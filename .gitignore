@@ -1,0 +1,36 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+artifacts/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userprefs
+*.DotSettings.user
+
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+
+# Logs and scratch files
+*.log
+parse-errors.log
+rx.log
+echo.log
+test.log
+
+# Dumped amp data (uncomment to keep it in the repo)
+presets.json
+presets-raw.json
+# *.pcapng
+
+# OS files
+.DS_Store
+Thumbs.db
