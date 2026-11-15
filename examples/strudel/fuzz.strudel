@@ -1,0 +1,11 @@
+const ws = new WebSocket('ws://localhost:8080/');
+const send   = (node, param, value) => ws.readyState === 1 && ws.send(JSON.stringify({ node, param, value }));
+const swap   = (node, model)        => ws.readyState === 1 && ws.send(JSON.stringify({ node, model }));
+const drive  = (node, param, pat)   => pat.onTrigger((hap) => send(node, param, hap.value));
+const toggle = (node, param, pat)   => pat.onTrigger((hap) => send(node, param, hap.value > 0));
+
+$: drive('stomp',  'gain',  sine.range(0.5, 1).segment(32).slow(13))
+$: drive('stomp',  'blend', sine.range(0.6, 1).segment(32).slow(7))
+$: drive('stomp',  'tone',  sine.range(0.1, 0.6).segment(32).slow(5))
+$: drive('amp',    'gain',  sine.range(0.6, 1).segment(32).slow(17))
+$: drive('reverb', 'decay', sine.range(0.3, 1).segment(32).slow(23))
