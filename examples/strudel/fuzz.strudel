@@ -1,8 +1,15 @@
-const ws = new WebSocket('ws://localhost:8080/');
-const send   = (node, param, value) => ws.readyState === 1 && ws.send(JSON.stringify({ node, param, value }));
-const swap   = (node, model)        => ws.readyState === 1 && ws.send(JSON.stringify({ node, model }));
-const drive  = (node, param, pat)   => pat.onTrigger((hap) => send(node, param, hap.value));
-const toggle = (node, param, pat)   => pat.onTrigger((hap) => send(node, param, hap.value > 0));
+if (!globalThis.ws || globalThis.ws.readyState > 1) globalThis.ws = new WebSocket('ws://localhost:8080/');
+const ws = globalThis.ws;
+const whenOpen = (fn) => ws.readyState === 1 ? fn() : ws.addEventListener('open', fn, { once: true });
+
+const send      = (node, param, value)  => whenOpen(() => ws.send(JSON.stringify({ node, param, value })));
+const swap      = (node, model)         => whenOpen(() => ws.send(JSON.stringify({ node, model })));
+const drive     = (node, param, pat)    => pat.onTrigger((hap) => send(node, param, hap.value));
+const toggle    = (node, param, pat)    => pat.onTrigger((hap) => send(node, param, hap.value > 0));
+
+swap('stomp', 'DUBS_BigFuzz')
+swap('amp', 'DUBS_Ac30Tb')
+swap('reverb', 'DUBS_LargePlate')
 
 $: drive('stomp',  'gain',  sine.range(0.5, 1).segment(32).slow(13))
 $: drive('stomp',  'blend', sine.range(0.6, 1).segment(32).slow(7))

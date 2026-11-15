@@ -116,7 +116,7 @@ public sealed class TuiView
             string color = off ? "grey" : "green";
             string model = n.IsPassthru
                 ? "(empty)"
-                : Markup.Escape(n.FenderId.Replace("DUBS_", ""));
+                : n.FenderId;
 
             rows.Add(new Markup($"{Markup.Escape(n.NodeId),-7} [{color}]{model}[/]"));
 
