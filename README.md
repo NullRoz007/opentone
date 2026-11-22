@@ -39,7 +39,7 @@ Every command except `list` needs `-d, --device <device>`. Run `opentone list` t
 | `get <type> <arg1> [arg2]` | Read `param <node> <param>`, `preset <slot>` or `node <node>` |
 | `set <type> <arg1> [arg2] [arg3]` | Set `param <node> <param> <value>`, `preset <slot>` or `model <node> <model>` |
 | `dump <input> <output>` | Extract the firmware from a capture and save it |
-| `update <path>` | Flash a firmware file (update mode only) |
+| `flash <path>` | Flash a firmware file (update mode only) |
 
 Nodes are `stomp`, `mod`, `amp`, `delay` and `reverb`.
 
@@ -56,7 +56,7 @@ opentone set preset 3 -d <device>
 opentone connect -d <device>
 ```
 
-Connects to the amp, starts the keepalive, starts a WebSocket server on port 8080, syncs with the amp and opens the terminal UI. Every command except `dump` and `update` can be run live inside the session.
+Connects to the amp, starts the keepalive, starts a WebSocket server on port 8080, syncs with the amp and opens the terminal UI. Every command except `dump` and `flash` can be run live inside the session.
 
 The messages used by the WebSocket server are documented in [WebSocket messages](docs/websocket-messages.md).
 
@@ -75,7 +75,7 @@ This lists the embedded presets found in the image, prints the calculated and ex
 Put the amp in update mode, close Fender Tone, then:
 
 ```
-opentone update firmware.bin -d <device>
+opentone flash firmware.bin -d <device>
 ```
 
 The command validates the image, shows the device details and asks for confirmation before it writes anything.
@@ -95,11 +95,3 @@ This software comes with no warranty.
 
 - [USB protocol](docs/mustang-lt25-usb-protocol.md): device modes, report framing, commands, update protocol and firmware image format.
 - [Node models and parameters](docs/mustang-lt25-nodes.md): the effect and amp models and parameters found in the 60 presets.
-
-## Legal
-
-Firmware images and captures belong to their owners and may contain device identifiers. Do not commit them to this repository.
-
-## License
-
-To be added.
