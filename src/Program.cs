@@ -11,8 +11,7 @@ app.Configure(config =>
     config.AddCommand<DumpCommand>("dump").WithDescription("Dump the firmware from a PcapNG capture");
     config.AddCommand<UpdateCommand>("flash").WithDescription("Flash a firmware file");
     config.AddCommand<GetCommand>("get").WithDescription("Get amplifier parameters, presets, and nodes");
-    config.AddCommand<SetCommand>("set").WithDescription("Set amplifier parameters, presets, and models");
-    
+    config.AddCommand<SetCommand>("set").WithDescription("Set amplifier parameters, presets, and models"); 
 });
 
 return app.Run(args);
