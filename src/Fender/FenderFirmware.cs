@@ -24,7 +24,6 @@ namespace OpenTone
         public UpdateControl ReadFirmwareStatus(int timeout = DefaultTimeoutMs) => (UpdateControl)(Read(timeout) ?? throw new TimeoutException())[2];
         private const int  FrameDataLength = 32;
 
-        // command | report id | sequence | payload length | ...
         private void BeginUpdate(int timeout = DefaultTimeoutMs)
         {
             byte[] report = new byte[reportSize];
