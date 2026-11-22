@@ -13,6 +13,34 @@ public sealed class TuiCommandRegistry
         ["setparam"] = (amp, a) => AmpActions.SetParamAuto(amp, a[0], a[1], a[2]),
         ["getparam"] = (amp, a) => AmpActions.GetParam(amp, a[0], a[1]),
         ["setmodel"] = (amp, a) => AmpActions.SetModel(amp, a[0], a[1]),
+        ["get"] = (amp, a) =>
+        {
+            switch(a[0])
+            {
+                case "param":
+                    return AmpActions.GetParam(amp, a[1], a[2]);
+                case "preset":
+                    return AmpActions.GetPreset(amp, int.Parse(a[1]));
+                case "node":
+                    return AmpActions.ViewNode(amp, a[1]);
+                default:
+                    throw new Exception("Unknown type: "+a[0]);
+            }
+        },
+        ["set"] = (amp, a) =>
+        {
+            switch(a[0])
+            {
+                case "param":
+                    return AmpActions.SetParamAuto(amp, a[1], a[2], a[3]);
+                case "preset":
+                    return AmpActions.SetPreset(amp, int.Parse(a[1]));
+                case "model":
+                    return AmpActions.SetModel(amp, a[1], a[2]);
+                default:
+                    throw new Exception("Unknown type: "+a[0]);
+            }
+        }
     };
 
     public string Help => string.Join(", ", _handlers.Keys.Append("quit"));

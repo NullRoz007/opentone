@@ -5,23 +5,17 @@ using LibUsbDotNet.Main;
 
 namespace OpenTone
 {
-    /// <summary>
-    /// Talks to HID interface 0 of an already-opened device: sends 64-byte reports,
-    /// reassembles multi-report messages, and pulls values out of Protobuf replies.
-    /// </summary>
-    internal sealed class FenderTransport
+    internal class UsbTransport 
     {
-        const int DefaultTimeoutMs = 1000;
+        public const int DefaultTimeoutMs = 1000;
+        public readonly int reportSize;    
+        public readonly IUsbDevice device;
+        public readonly UsbEndpointReader reader;
+        public readonly UsbEndpointWriter writer;
 
-        readonly IUsbDevice device;
-        readonly UsbEndpointReader reader;
-        readonly UsbEndpointWriter writer;
-
-        /// <summary>How many messages ReadFirstField will inspect before giving up.</summary>
-        public int MaxReadAttempts { get; set; } = 100;
-
-        public FenderTransport(IUsbDevice opened)
+        public UsbTransport(IUsbDevice opened, int reportSize = FenderProtocol.ReportSize)
         {
+            this.reportSize = reportSize;
             device = opened;
             if (!device.ClaimInterface(0)) throw new InvalidOperationException("Error claiming interface: 0");
 
@@ -58,19 +52,20 @@ namespace OpenTone
                 transaction();
             }
         }
-        public void Write(byte[] buffer64)
+
+        public void Write(byte[] buffer64, int timeout = DefaultTimeoutMs)
         {
             lock (writeLock)
             {
-                    Error err = writer.Write(buffer64, DefaultTimeoutMs, out _);
-                    if (err != Error.Success) throw new IOException("write: " + err);
+                Error err = writer.Write(buffer64, timeout, out _);
+                if (err != Error.Success) throw new IOException("write: " + err);
             }
         }
 
-        /// <summary>Reads one 64-byte report; returns null on timeout.</summary>
+        /// <summary>Reads one 'reportSize' length report; returns null on timeout.</summary>
         public byte[]? Read(int timeout = DefaultTimeoutMs)
         {
-            byte[] buffer = new byte[FenderProtocol.ReportSize];
+            byte[] buffer = new byte[reportSize];
             lock(readLock) {
                 Error err = reader.Read(buffer, timeout, out _);
                 if (err == Error.Timeout) return null;
@@ -78,6 +73,17 @@ namespace OpenTone
                 return buffer;
             }
         }
+    }
+
+    /// <summary>
+    /// Talks to HID interface 0 of an already-opened device: sends 64-byte reports,
+    /// reassembles multi-report messages, and pulls values out of Protobuf replies.
+    /// </summary>
+    internal sealed class FenderTransport : UsbTransport
+    {
+        /// <summary>How many messages ReadFirstField will inspect before giving up.</summary>
+        public int MaxReadAttempts { get; set; } = 100;
+        public FenderTransport(IUsbDevice opened) : base(opened){}
 
         // ---- messages ----
 

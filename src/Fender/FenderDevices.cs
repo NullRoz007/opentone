@@ -9,11 +9,14 @@ namespace OpenTone
     public static class FenderDevices
     {
         public const string LT25 = "mustang-lt25";
+        public const string LT_DFU = "lt-dfu";
+        public const string LT_UPDATER_DEVICE_NAME = "Mustang LT Updater v1.0.0";
 
         public static IReadOnlyDictionary<string, UsbId> Known { get; } =
             new Dictionary<string, UsbId>
             {
                 [LT25] = new UsbId(0x1ED8, 0x0037),
+                [LT_DFU] = new UsbId(0x1ED8, 0x0033),
             };
 
         /// <summary>
@@ -36,7 +39,6 @@ namespace OpenTone
 
         internal static IUsbDevice[]? FindAll(UsbContext context)
         {
-
             var devices = context.List();   // not disposed: disposing the list disposes the devices
             return devices.Where(d => Known.Values.Any(id => d.Info.VendorId == id.Vid && d.Info.ProductId == id.Pid)).ToArray();
         }

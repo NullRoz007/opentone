@@ -61,6 +61,9 @@ namespace OpenTone
             }
         }
 
+        public IUsbContext GetUsbContext() => context;
+        public IUsbDevice GetUsbDevice() => device;
+
         /// <summary>How many incoming messages a request will inspect before giving up on its reply.</summary>
         public int MaxReadAttempts
         {

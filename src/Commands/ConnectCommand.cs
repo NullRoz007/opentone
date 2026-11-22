@@ -5,9 +5,9 @@ using System.ComponentModel;
 
 public class ConnectSettings : CommandSettings
     {
-        [CommandArgument(0, "<device>")]
-        [Description("Device name (see 'tone list')")]
-        public string Device { get; init; } = FenderDevices.LT25;
+        [CommandOption("-d|--device")]
+        [Description("Target device")]
+        public required string Device { get; init; }
     }
 
     public class ConnectCommand : Command<ConnectSettings>
@@ -31,8 +31,6 @@ public class ConnectSettings : CommandSettings
                 
                 AnsiConsole.Cursor.Show();
                 AnsiConsole.Clear();
-
-                
             }
             
             return 0;

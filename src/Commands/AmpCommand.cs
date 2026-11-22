@@ -16,11 +16,12 @@ public interface IDeviceSettings
             CancellationToken cancellation)
         {
             using var amp = FenderAmp.Connect(settings.Device);
-
-            if (amp.Hello() == null)
-            {
-                AnsiConsole.MarkupLine("[red]No reply to hello[/]");
-                return 1;
+            if(amp.GetDeviceName() != FenderDevices.LT_UPDATER_DEVICE_NAME) {
+                if (amp.Hello() == null)
+                {
+                    AnsiConsole.MarkupLine("[red]No reply to hello[/]");
+                    return 1;
+                }
             }
 
             Run(amp, settings);

@@ -79,7 +79,7 @@ class WebSocketServer
         using var stopOnCancel = ct.Register(listener.Stop);
 
         messageHandler = new WebSocketMessageHandler(amp);
-        Task worker = messageHandler.RunAsync(ct);               // the only code that talks to the amp
+        Task worker = messageHandler.RunAsync(ct);
 
         try
         {
