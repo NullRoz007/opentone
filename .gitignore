@@ -29,6 +29,8 @@ test.log
 # Dumped amp data (uncomment to keep it in the repo)
 presets.json
 presets-raw.json
+firmware/
+*.bin
 # *.pcapng
 
 # OS files
