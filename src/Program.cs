@@ -4,7 +4,7 @@ using Spectre.Console.Cli;
 var app = new CommandApp();
 app.Configure(config =>
 {
-    config.SetApplicationName("tone");
+    config.SetApplicationName("opentone");
     config.AddCommand<ListCommand>("list").WithDescription("List available devices");
     config.AddCommand<ConnectCommand>("connect").WithDescription("Connect to a device");
     config.AddCommand<FirmwareCommand>("firmware").WithDescription("Show the firmware version");
