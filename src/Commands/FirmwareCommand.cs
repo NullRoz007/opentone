@@ -27,6 +27,10 @@ public class FirmwareUpdateSettings : CommandSettings, IDeviceSettings
     [CommandOption("-d|--device")]
     [Description("Target device")]
     public required string Device { get; init; }
+
+    [CommandOption("-y|--yes")]
+    [Description("Flash without asking for confirmation. Required when not run in an interactive terminal.")]
+    public bool Yes { get; init; }
 }
 
 public class FirmwareDumpSettings : CommandSettings, IDeviceSettings
@@ -48,9 +52,37 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
 {
     protected override void Run(FenderAmp amp, FirmwareUpdateSettings settings)
     {
-        AnsiConsole.Cursor.Hide();
-        AnsiConsole.Clear();
+        bool interactive = AnsiConsole.Profile.Capabilities.Interactive;
+        if (!interactive && !settings.Yes)
+        {
+            AnsiConsole.MarkupLine("[red]Not an interactive terminal. Pass --yes to flash without the confirmation prompt.[/]");
+            return;
+        }
 
+        if (interactive)
+        {
+            AnsiConsole.Cursor.Hide();
+            AnsiConsole.Clear();
+        }
+
+        try
+        {
+            Flash(amp, settings, interactive);
+        }
+        catch (FirmwareUpdateInterruptedException e)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(e.Message)}[/]");
+            AnsiConsole.MarkupLine("[yellow]The amp has started the update and is still in update mode. Run flash again with a valid image.[/]");
+            throw;
+        }
+        finally
+        {
+            if (interactive) AnsiConsole.Cursor.Show();
+        }
+    }
+
+    private static void Flash(FenderAmp amp, FirmwareUpdateSettings settings, bool interactive)
+    {
         byte[] raw = File.ReadAllBytes(settings.Path);
         var usbDevice = amp.GetUsbDevice();
         FirmwareTransport fwTransport = new(usbDevice);
@@ -91,9 +123,9 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
 
         AnsiConsole.Write(table);
 
-        bool confirmed = AnsiConsole.Confirm("Valid firmware found, proceed with flashing?", false);
+        bool confirmed = settings.Yes || AnsiConsole.Confirm("Valid firmware found, proceed with flashing?", false);
         if(confirmed) {
-            AnsiConsole.Write(new ControlCode("\u001b[1A\u001b[2K"));
+            if (interactive && !settings.Yes) AnsiConsole.Write(new ControlCode("\u001b[1A\u001b[2K"));
             AnsiConsole.Progress()
             .Columns(
                 new TaskDescriptionColumn(),
@@ -106,7 +138,6 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
                 fwTransport.SendFirmware(firmware.Payload, p =>
                 {
                     flash.Description = $"Flashing firmware";
-                    int percentage = p.frameIndex / p.frameCount * 100;
                     flash.Value = 100.0 * (p.frameIndex + 1) / p.frameCount;
                 });
 

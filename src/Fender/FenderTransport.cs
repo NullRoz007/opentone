@@ -67,9 +67,12 @@ namespace OpenTone
         {
             byte[] buffer = new byte[reportSize];
             lock(readLock) {
-                Error err = reader.Read(buffer, timeout, out _);
+                Error err = reader.Read(buffer, timeout, out int transferred);
                 if (err == Error.Timeout) return null;
-                if (err != Error.Success) throw new IOException("read: " + err);
+                if (err != Error.Success) throw new IOException($"read: {err} ({transferred} bytes transferred)");
+                // Return the whole report. Don't slice by 'transferred': with the Windows HID backend
+                // (update mode binds to HidUsb) the reported count can exceed the buffer, and
+                // buffer[..transferred] then throws ArgumentOutOfRangeException.
                 return buffer;
             }
         }

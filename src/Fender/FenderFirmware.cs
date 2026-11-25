@@ -17,7 +17,24 @@ namespace OpenTone
         Data = 0x03,
         End = 0x04,
     };
-    
+
+    /// <summary>
+    /// Thrown when a flash fails after Begin was acknowledged. The amp has erased its application
+    /// and is left in update mode, so the flash should be run again.
+    /// </summary>
+    public sealed class FirmwareUpdateInterruptedException : Exception
+    {
+        public int FrameIndex { get; }
+        public int FrameCount { get; }
+
+        public FirmwareUpdateInterruptedException(int frameIndex, int frameCount, Exception inner)
+            : base($"Flash interrupted at frame {frameIndex} of {frameCount}: {inner.Message}", inner)
+        {
+            FrameIndex = frameIndex;
+            FrameCount = frameCount;
+        }
+    }
+
     internal sealed class FirmwareTransport : UsbTransport
     {
         public FirmwareTransport(IUsbDevice opened) : base(opened) { }
@@ -51,9 +68,22 @@ namespace OpenTone
                 throw new InvalidDataException($"Image length {firmware.Length} is not a multiple of {FrameDataLength}");
             
             BeginUpdate(timeout);
-            
-            byte[] report = new byte[reportSize];
+
             int frameCount = firmware.Length / FrameDataLength;
+            int frameIndex = 0;
+            try
+            {
+                SendFrames(firmware, frameCount, ref frameIndex, onProgress, timeout, updateRate);
+            }
+            catch (Exception e)
+            {
+                throw new FirmwareUpdateInterruptedException(frameIndex, frameCount, e);
+            }
+        }
+
+        private void SendFrames(byte[] firmware, int frameCount, ref int frameIndex, Action<SendFirmwareCallback>? onProgress, int timeout, int updateRate)
+        {
+            byte[] report = new byte[reportSize];
             void Progress(int i, int c, byte[] r) {
                 try {
                     onProgress?.Invoke(new SendFirmwareCallback
@@ -67,6 +97,7 @@ namespace OpenTone
             
             for(int i = 0; i < frameCount; i++)
             {
+                frameIndex = i;
                 Array.Clear(report);
                 report[0] = (byte)UpdateControl.Data;
                 report[1] = 0x03;
@@ -79,6 +110,7 @@ namespace OpenTone
                 if (i % updateRate == 0) Progress(i, frameCount, report);
             }
 
+            frameIndex = frameCount;
             Array.Clear(report);
             report[0] = (byte)UpdateControl.End;
             report[1] = 0x03;
