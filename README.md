@@ -77,6 +77,7 @@ This checks the CRC and saves the image. No amp needs to be connected.
 
 | Option | Effect |
 |---|---|
+| `--info` | Everything readable from the image: CRC, SHA-256 and whether it is a known official build, version and product strings, memory layout (from the reset handler), USB descriptor and handled request types, boot-patch state, presets, model menu, images (factory or modified) and build details |
 | `--list` | Factory presets (slots 1-30 and the `empty` template for 31-60), version, models and images |
 | `--show <slot\|empty\|model>` | Parameters with their current values and allowed values |
 | `--rename SLOT=NAME` | Rename a preset. Names are 16 characters of A-Z, 0-9 and space; shorter names are padded. `LINE1\|LINE2` pads each half to 8 |

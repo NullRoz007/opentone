@@ -31,16 +31,28 @@ namespace OpenTone
                     $"Invalid deviceName: {deviceName}. Known: {string.Join(", ", Known.Keys)}",
                     nameof(deviceName));
 
-            var devices = context.List();   // not disposed: disposing the list disposes the devices
+            // The list itself isn't disposed (that would dispose the chosen device too), but every device we
+            // don't keep is released now, while the context is alive. Leaving them to the finalizer crashes
+            // (access violation in UnrefDevice) once the context has been disposed.
+            var devices = context.List();
             var device = devices.FirstOrDefault(d => d.Info.VendorId == id.Vid && d.Info.ProductId == id.Pid);
+            bool opened = device != null && device.TryOpen();
 
-            return device != null && device.TryOpen() ? device : null;
+            foreach (var other in devices)
+                if (!opened || !ReferenceEquals(other, device)) other.Dispose();
+
+            return opened ? device : null;
         }
 
         internal static IUsbDevice[]? FindAll(UsbContext context)
         {
-            var devices = context.List();   // not disposed: disposing the list disposes the devices
-            return devices.Where(d => Known.Values.Any(id => d.Info.VendorId == id.Vid && d.Info.ProductId == id.Pid)).ToArray();
+            // Devices that aren't returned are released now, while the context is alive (see Find).
+            // The caller must dispose the returned devices before disposing the context.
+            var devices = context.List();
+            var known = devices.Where(d => Known.Values.Any(id => d.Info.VendorId == id.Vid && d.Info.ProductId == id.Pid)).ToArray();
+            foreach (var other in devices)
+                if (!known.Contains(other)) other.Dispose();
+            return known;
         }
     }
 }

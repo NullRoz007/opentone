@@ -200,7 +200,6 @@ namespace OpenTone
                 switch(command)
                 {
                     case (byte)UpdateControl.Begin:
-                        AnsiConsole.WriteLine("Got UpdateControl.Begin");
                         begun = true;
                         break;
                     case (byte)UpdateControl.Data:
@@ -218,7 +217,6 @@ namespace OpenTone
                         if(begun) ended = true;
                         else throw new Exception("Got \"End\" Command Before \"Begin\"");
 
-                        AnsiConsole.WriteLine("Got UpdateControl.End");
                         break;
                     default:
                         break;

@@ -35,9 +35,16 @@ public class SetCommand : AmpCommand<SetSettings>
             "param" => AmpActions.SetParamAuto(amp, s.Arg1, s.Arg2 ?? "", s.Arg3 ?? ""),
             "preset" => AmpActions.SetPreset(amp, int.Parse(s.Arg1)),
             "model" => AmpActions.SetModel(amp, s.Arg1, s.Arg2 ?? ""),
-            _ => "Unknown type: " + s.Type
+            _ => throw new ArgumentException("Unknown type: " + s.Type)
         };
 
-        AnsiConsole.WriteLine(result);
+        string title = s.Type.ToLowerInvariant() switch
+        {
+            "param" => $"Node {s.Arg1} after setting {s.Arg2}",
+            "preset" => $"Preset {s.Arg1} selected",
+            "model" => $"Node {s.Arg1} after setting model",
+            _ => "Result",
+        };
+        Ui.Result(title, result);
     }
 }

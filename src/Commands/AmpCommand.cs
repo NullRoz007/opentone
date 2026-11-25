@@ -19,7 +19,7 @@ public interface IDeviceSettings
             if(amp.GetDeviceName() != FenderDevices.LT_UPDATER_DEVICE_NAME) {
                 if (amp.Hello() == null)
                 {
-                    AnsiConsole.MarkupLine("[red]No reply to hello[/]");
+                    Ui.Message("Error", "No reply to hello. Close Fender Tone and check the amp is connected and in normal mode.", Ui.Level.Error);
                     return 1;
                 }
             }

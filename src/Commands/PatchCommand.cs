@@ -31,6 +31,10 @@ public class PatchSettings : CommandSettings
     [Description("List the factory presets, the version and the available models.")]
     public bool List { get; init; }
 
+    [CommandOption("--info")]
+    [Description("Show everything that can be read from the image: identity, memory layout, USB, presets, models, images, boot patches and build details.")]
+    public bool Info { get; init; }
+
     [CommandOption("--show <TARGET>")]
     [Description("Show the parameters and allowed values of a preset (1-30, empty) or a model (e.g. SuperSonic).")]
     public string? Show { get; init; }
@@ -79,23 +83,28 @@ public class PatchCommand : Command<PatchSettings>
     public override int Execute(CommandContext context, PatchSettings settings, CancellationToken cancellation)
     {
         var firmware = Load(settings.Input);
-        FirmwareConsole.WriteLoaded(settings.Input, firmware);
+        Ui.FirmwareSummary(settings.Input, firmware);
 
         var patcher = new FirmwarePatcher(firmware.Payload);
-        foreach (var problem in patcher.Problems) AnsiConsole.MarkupLine($"[red]warning:[/] {Markup.Escape(problem)}");
+        if (!settings.Info)     // --info shows them in its presets section
+            Ui.Messages("Warnings", patcher.Problems, Ui.Level.Warning);
 
-        if (settings.List) PrintList(patcher);
+        if (settings.Info) PrintInfo(FirmwareInfo.Read(firmware.Payload));
+        if (settings.List && !settings.Info) PrintList(patcher);
         if (settings.Show != null) PrintShow(patcher, settings.Show);
+
+        var notes = new List<string>();
+        void Note(string? note) { if (note != null) notes.Add(note); }
 
         // Whole presets first, so --rename and --set can adjust them afterwards.
         foreach (var (target, preset, source) in ReadPulledPresets(settings))
-            foreach (var n in patcher.ImportPreset(patcher.GetPreset(target), preset, source)) Note(n);
+            foreach (var n in patcher.ImportPreset(patcher.GetPreset(target), preset, source)) Note($"{source}: {n}");
 
         foreach (var spec in settings.Import)
         {
             var (target, file) = Split(spec, '=', "--import", "FWSLOT=FILE");
             var json = JsonNode.Parse(File.ReadAllText(file)) ?? throw new ArgumentException($"{file} is empty.");
-            foreach (var n in patcher.ImportPreset(patcher.GetPreset(target), json, Path.GetFileName(file))) Note(n);
+            foreach (var n in patcher.ImportPreset(patcher.GetPreset(target), json, Path.GetFileName(file))) Note($"{Path.GetFileName(file)}: {n}");
         }
 
         foreach (var spec in settings.Rename)
@@ -109,7 +118,7 @@ public class PatchCommand : Command<PatchSettings>
             var (slot, rest) = Split(spec, ':', "--set", "SLOT:NODE.PARAM=VALUE");
             var (target, value) = Split(rest, '=', "--set", "SLOT:NODE.PARAM=VALUE");
             var (node, param) = Split(target, '.', "--set", "SLOT:NODE.PARAM=VALUE");
-            Note(patcher.SetPresetParam(patcher.GetPreset(slot), node, param, value));
+            Note(patcher.SetPresetParam(patcher.GetPreset(slot), node, param, value) is { } n ? $"preset {slot} {node}.{param}: {n}" : null);
         }
 
         foreach (var spec in settings.ModelDefault)
@@ -117,16 +126,21 @@ public class PatchCommand : Command<PatchSettings>
             var (target, value) = Split(spec, '=', "--model-default", "MODEL.PARAM=VALUE");
             int dot = target.LastIndexOf('.');
             if (dot <= 0) throw new ArgumentException($"--model-default expects MODEL.PARAM=VALUE, got '{spec}'.");
-            Note(patcher.SetModelDefault(patcher.GetModel(target[..dot]), target[(dot + 1)..], value));
+            Note(patcher.SetModelDefault(patcher.GetModel(target[..dot]), target[(dot + 1)..], value) is { } n ? $"{target}: {n}" : null);
         }
 
         // Export before replacing, so --export-image always saves what the input contains.
-        foreach (var spec in settings.ExportImage)
+        if (settings.ExportImage.Length > 0)
         {
-            var (name, file) = Split(spec, '=', "--export-image", "NAME=FILE");
-            var img = patcher.GetImage(name);
-            Bmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
-            AnsiConsole.MarkupLine($"Saved image {Markup.Escape(img.Name)} ({img.Width}x{img.Height}) to [bold]{Markup.Escape(file)}[/]");
+            var exported = Ui.Table("Exported images", "Image", "Size", "File");
+            foreach (var spec in settings.ExportImage)
+            {
+                var (name, file) = Split(spec, '=', "--export-image", "NAME=FILE");
+                var img = patcher.GetImage(name);
+                Bmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
+                exported.AddRow(Markup.Escape(img.Name), $"{img.Width}x{img.Height}", $"[bold]{Markup.Escape(file)}[/]");
+            }
+            AnsiConsole.Write(exported);
         }
 
         foreach (var spec in settings.Image)
@@ -143,15 +157,21 @@ public class PatchCommand : Command<PatchSettings>
         byte[] result = patcher.Changes.Count > 0 ? patcher.Build() : firmware.Payload;
         ValidateFirmware(result, out _, out uint crc);
 
+        Ui.Messages("Notes", notes, Ui.Level.Note);
+
         if (patcher.Changes.Count > 0)
         {
-            AnsiConsole.MarkupLine($"[bold]{patcher.Changes.Count} change(s)[/], all checks passed, new CRC 0x{crc:X8}:");
-            foreach (var c in patcher.Changes) AnsiConsole.MarkupLine($"  [green]+[/] {Markup.Escape(c)}");
+            var changes = Ui.Table("Changes", "#", "Change")
+                .Caption($"[green]all checks passed[/], new CRC 0x{crc:X8}");
+            for (int i = 0; i < patcher.Changes.Count; i++)
+                changes.AddRow((i + 1).ToString(), Markup.Escape(patcher.Changes[i]));
+            AnsiConsole.Write(changes);
         }
 
         if (settings.Output == null || settings.DryRun)
         {
-            if (patcher.Changes.Count > 0 || settings.DryRun) AnsiConsole.MarkupLine("[grey]Nothing written (no output path, or --dry-run).[/]");
+            if (patcher.Changes.Count > 0 || settings.DryRun)
+                Ui.Message("Output", settings.DryRun ? "Nothing written (--dry-run)." : "Nothing written (no output path given).", Ui.Level.Note);
             return 0;
         }
 
@@ -159,7 +179,10 @@ public class PatchCommand : Command<PatchSettings>
             throw new ArgumentException("Refusing to overwrite the input file. Choose a different output path.");
 
         File.WriteAllBytes(settings.Output, result);
-        AnsiConsole.MarkupLine($"Wrote {result.Length} bytes to [bold]{Markup.Escape(settings.Output)}[/]");
+        AnsiConsole.Write(Ui.KeyValues("Output")
+            .Row("Written to", $"[bold]{Markup.Escape(settings.Output)}[/]")
+            .Row("Size", $"{result.Length} bytes")
+            .Row("CRC-32", $"0x{crc:X8} [green]valid[/]"));
         return 0;
     }
 
@@ -205,14 +228,17 @@ public class PatchCommand : Command<PatchSettings>
         using var amp = FenderAmp.Connect(device);
         if (amp.Hello() == null) throw new IOException("No reply to hello. Close Fender Tone and check the amp is in normal mode.");
 
+        var read = Ui.Table("Read from amp", "Source", "Name", "Firmware slot");
+
         foreach (var r in requests)
         {
             JsonNode preset = (r.Current ? amp.GetCurrentPreset() : amp.ReadPreset(int.Parse(r.From)))
                 ?? throw new IOException($"The amp did not return preset {r.From}.");
             string source = r.Current ? "amp current preset" : $"amp slot {r.From}";
-            AnsiConsole.MarkupLine($"Read {Markup.Escape(source)}: [bold]{Markup.Escape((string?)preset["info"]?["displayName"] ?? "?")}[/]");
+            read.AddRow(Markup.Escape(source), $"[bold]{Markup.Escape((string?)preset["info"]?["displayName"] ?? "?")}[/]", Markup.Escape(r.To));
             result.Add((r.To, preset, source));
         }
+        AnsiConsole.Write(read);
         return result;
     }
 
@@ -223,18 +249,111 @@ public class PatchCommand : Command<PatchSettings>
         return (spec[..i].Trim(), spec[(i + 1)..]);
     }
 
-    private static void Note(string? note)
+    private static string Hex(uint v) => $"0x{v:X8}";
+
+    private static void PrintInfo(FirmwareInfo info)
     {
-        if (note != null) AnsiConsole.MarkupLine($"  [yellow]note:[/] {Markup.Escape(note)}");
+        var p = info.Patcher;
+
+        Ui.Section("Image");
+        AnsiConsole.Write(Ui.KeyValues()
+            .Row("Size", $"{info.Size} bytes ({info.Size / 32} update frames of 32 bytes)")
+            .Row("CRC-32 (STM32)", $"0x{info.CrcCalculated:X8} [green]valid[/]")
+            .Row("SHA-256", info.Sha256)
+            .Row("Identified as", info.KnownAs != null ? $"[green]{Markup.Escape(info.KnownAs)}[/]" : "[yellow]not a known official image (modified or unknown build)[/]")
+            .Row("Load address", $"{Hex(info.LoadAddress)} - {Hex(info.LoadAddress + (uint)info.Size)}"));
+
+        Ui.Section("Identity");
+        var t = Ui.KeyValues().Row("Version", $"[bold]{Markup.Escape(info.Version)}[/]");
+        if (info.ProductId != null) t.Row("Preset product_id", Markup.Escape(info.ProductId));
+        if (info.ProductFamily != null) t.Row("Product family", Markup.Escape(info.ProductFamily));
+        if (info.ProductNames.Count > 0) t.Row("Product strings", Markup.Escape(string.Join(", ", info.ProductNames)));
+        AnsiConsole.Write(t);
+
+        Ui.Section("Memory layout");
+        if (info.Layout is { } l)
+        {
+            t = Ui.KeyValues()
+                .Row("Initial stack pointer", Hex(l.InitialStackPointer))
+                .Row("Reset handler", Hex(l.ResetHandler & ~1u))
+                .Row(".data", $"{Hex(l.DataStart)} - {Hex(l.DataEnd)} ({l.DataEnd - l.DataStart} bytes, loaded from {Hex(l.DataLoadAddress)})")
+                .Row(".bss", $"{Hex(l.BssStart)} - {Hex(l.BssEnd)} ({l.BssEnd - l.BssStart} bytes)");
+            string[] callNames = ["SystemInit", "C++ constructors", "main"];
+            for (int i = 0; i < l.StartupCalls.Count; i++)
+                t.Row(i < callNames.Length ? $"{callNames[i]} (inferred)" : "call", Hex(l.StartupCalls[i]));
+            AnsiConsole.Write(t);
+        }
+        else Ui.Message("Memory layout", "Reset handler not recognised.", Ui.Level.Note);
+
+        Ui.Section("USB");
+        t = Ui.KeyValues();
+        if (info.Usb is { } u)
+        {
+            t.Row("Device descriptor", $"at {Hex(u.Address)}")
+             .Row("VID:PID", $"{u.VendorId:X4}:{u.ProductId:X4}")
+             .Row("bcdUSB / bcdDevice", $"{u.BcdUsb >> 8}.{u.BcdUsb & 0xFF:X2} / {u.BcdDevice >> 8}.{u.BcdDevice & 0xFF:X2}")
+             .Row("EP0 max packet", $"{u.MaxPacketSize0} bytes, {u.Configurations} configuration(s)");
+        }
+        else t.Row("Device descriptor", "[grey]not found[/]");
+        if (info.UsbRequests is { } reqs)
+        {
+            t.Row("Request dispatcher", $"at {Hex(info.UsbDispatcher!.Value)}, {reqs.Count} request types handled")
+             .Row("Handled fields", Markup.Escape(string.Join(", ", reqs.Select(r => r.Name != null ? $"{r.Field} ({r.Name})" : r.Field.ToString()))));
+        }
+        else t.Row("Request dispatcher", "[grey]not recognised[/]");
+        AnsiConsole.Write(t);
+
+        Ui.Section("Boot and data flash");
+        t = Ui.KeyValues();
+        foreach (var (name, state) in info.BootPatches)
+            t.Row(name, state switch { "stock" => "[green]stock[/]", "applied" => "[yellow]applied[/]", _ => "[grey]not found[/]" });
+        if (info.DataFlashMarkers.Count > 0) t.Row("Data flash markers", Markup.Escape(string.Join(", ", info.DataFlashMarkers)));
+        AnsiConsole.Write(t);
+
+        Ui.Section("Factory presets");
+        Ui.Messages("Warnings", p.Problems, Ui.Level.Warning);
+        AnsiConsole.Write(PresetTable(p, null));
+
+        Ui.Section("Models");
+        var models = Ui.Table($"{p.Models.Count} defined", "Menu", "Name on amp", "Model", "Params", "Defined");
+        foreach (var e in info.Catalogue)
+        {
+            int parameters = e.Defined ? p.GetParameters(p.Models[e.FenderId]).Count : 0;
+            models.AddRow(Markup.Escape(e.CategoryMenuName), Markup.Escape(e.MenuName), Markup.Escape(e.FenderId.Replace("DUBS_", "")),
+                e.Defined ? parameters.ToString() : "", e.Defined ? "[green]yes[/]" : "[red]no[/]");
+        }
+        if (info.ModelsNotInCatalogue.Count > 0)
+            models.Caption($"Defined but not in any menu: {Markup.Escape(string.Join(", ", info.ModelsNotInCatalogue.Select(m => m.Replace("DUBS_", ""))))}");
+        AnsiConsole.Write(models);
+
+        Ui.Section("Images");
+        if (info.Images.Count > 0)
+        {
+            var images = Ui.Table(null, "Image", "Size", "Address", "State", "Description");
+            foreach (var img in info.Images)
+                images.AddRow(Markup.Escape(img.Image.Name), $"{img.Image.Width}x{img.Image.Height}", Hex(FirmwarePatcher.LoadAddress + (uint)img.Image.Offset),
+                    img.Factory ? "[green]factory[/]" : "[yellow]modified[/]", $"[grey]{Markup.Escape(img.Image.Description)}[/]");
+            AnsiConsole.Write(images);
+        }
+        else Ui.Message("Images", "None recognised.", Ui.Level.Note);
+
+        Ui.Section("Build");
+        t = Ui.KeyValues();
+        if (info.BuildAgentWorkDir != null) t.Row("Build agent", $"TeamCity, work directory {Markup.Escape(info.BuildAgentWorkDir)}");
+        t.Row("Source files named", info.SourceFiles.Count.ToString());
+        AnsiConsole.Write(t);
+
+        // Group by top two folders; files directly under a top folder (e.g. Src/adc.c) share one group.
+        static string Folder(string f) { var parts = f.Split('/'); return string.Join('/', parts.Take(Math.Min(2, parts.Length - 1))); }
+        var sources = Ui.Table(null, "Folder", "Files", "Names");
+        foreach (var group in info.SourceFiles.GroupBy(Folder).OrderBy(x => x.Key, StringComparer.Ordinal))
+            sources.AddRow(Markup.Escape(group.Key + "/"), group.Count().ToString(), $"[grey]{Markup.Escape(string.Join(", ", group.Select(f => Path.GetFileName(f))))}[/]");
+        AnsiConsole.Write(sources);
     }
 
-    private static void PrintList(FirmwarePatcher patcher)
+    private static Table PresetTable(FirmwarePatcher patcher, string? title)
     {
-        AnsiConsole.MarkupLine($"Version [bold]{Markup.Escape(patcher.Version)}[/]");
-
-        var table = new Table().Border(TableBorder.Rounded)
-            .AddColumn("Slot").AddColumn("Name").AddColumn("Amp")
-            .AddColumn(new TableColumn("Bytes").RightAligned()).AddColumn(new TableColumn("Spare").RightAligned());
+        var table = Ui.Table(title, "Slot", "Name", "Amp", "Bytes", "Spare");
         foreach (var p in patcher.Presets.Append(patcher.EmptyPreset))
         {
             var preset = FenderPreset.Parse(patcher.GetJson(p));
@@ -242,10 +361,16 @@ public class PatchCommand : Command<PatchSettings>
             string amp = preset.Amp?.FenderId?.Replace("DUBS_", "") ?? "";
             table.AddRow(slot, $"[bold]{Markup.Escape(p.Label)}[/]", Markup.Escape(amp), p.Length.ToString(), (p.Capacity - p.Length).ToString());
         }
-        AnsiConsole.Write(table);
-        AnsiConsole.MarkupLine($"[grey]Models: {Markup.Escape(string.Join(", ", patcher.Models.Keys.Select(k => k.Replace("DUBS_", "")).Order()))}[/]");
-        foreach (var img in patcher.Images)
-            AnsiConsole.MarkupLine($"[grey]Image {Markup.Escape(img.Name)}: {img.Width}x{img.Height} RGB565 - {Markup.Escape(img.Description)}[/]");
+        return table;
+    }
+
+    private static void PrintList(FirmwarePatcher patcher)
+    {
+        AnsiConsole.Write(Ui.KeyValues("Image contents")
+            .Row("Version", $"[bold]{Markup.Escape(patcher.Version)}[/]")
+            .Row("Models", Markup.Escape(string.Join(", ", patcher.Models.Keys.Select(k => k.Replace("DUBS_", "")).Order())))
+            .Row("Images", Markup.Escape(string.Join(", ", patcher.Images.Select(i => $"{i.Name} ({i.Width}x{i.Height})")))));
+        AnsiConsole.Write(PresetTable(patcher, "Factory presets"));
     }
 
     private static void PrintShow(FirmwarePatcher patcher, string target)
@@ -254,9 +379,8 @@ public class PatchCommand : Command<PatchSettings>
             ? patcher.GetPreset(target)
             : patcher.GetModel(target);
 
-        AnsiConsole.MarkupLine($"[bold]{Markup.Escape(entry.Label)}[/] ({entry.Kind}, {entry.Length} bytes, {entry.Capacity - entry.Length} spare)");
-        var table = new Table().Border(TableBorder.Rounded)
-            .AddColumn("Node").AddColumn("Model").AddColumn("Param").AddColumn("Value").AddColumn("Allowed");
+        var table = Ui.Table($"{entry.Label.TrimEnd()} ({entry.Kind}, {entry.Length} bytes, {entry.Capacity - entry.Length} spare)",
+            "Node", "Model", "Param", "Value", "Allowed");
         foreach (var p in patcher.GetParameters(entry))
             table.AddRow(Markup.Escape(p.NodeId), Markup.Escape(p.FenderId.Replace("DUBS_", "")), Markup.Escape(p.Param),
                 Markup.Escape(p.Value), $"[grey]{Markup.Escape(p.Rule.Describe())}[/]");

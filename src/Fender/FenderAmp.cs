@@ -245,6 +245,7 @@ namespace OpenTone
 
             transport.ReleaseInterface();
             device.Close();
+            device.Dispose();    // release the device handle now; a later finalizer would touch the freed context
             context.Dispose();   // must outlive the device, so it goes last
         }
     }

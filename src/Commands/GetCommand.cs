@@ -36,6 +36,25 @@ public class GetCommand : AmpCommand<GetSettings>
             _ => throw new ArgumentException("Unknown type: " + s.Type)
         };
 
-        AnsiConsole.WriteLine(result);
+        // Presets and nodes are printed as plain JSON (no panel, no colour) so they can be piped or saved.
+        if (IsJsonContainer(result))
+        {
+            Console.WriteLine(result);
+            return;
+        }
+
+        string title = s.Type.ToLowerInvariant() switch
+        {
+            "param" => $"{s.Arg1}.{s.Arg2}",
+            "preset" => $"Preset {s.Arg1}",
+            _ => $"Node {s.Arg1}",
+        };
+        Ui.Result(title, result);
+    }
+
+    private static bool IsJsonContainer(string? text)
+    {
+        try { return text != null && System.Text.Json.Nodes.JsonNode.Parse(text) is System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray; }
+        catch (System.Text.Json.JsonException) { return false; }
     }
 }

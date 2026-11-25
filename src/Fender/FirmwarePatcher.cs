@@ -865,6 +865,30 @@ public sealed class FirmwarePatcher
                 .Select(p => $"{Describe(p)} is not in the factory JSON format."))
             .ToList();
 
+    /// <summary>"stock", "applied" or "not found" for a boot patch in the current image.</summary>
+    public string GetBootPatchState(BootPatch patch)
+    {
+        switch (patch)
+        {
+            case BootPatch.ForceRestore:
+            {
+                if (FindAll(ForceRestoreSignature).Count == 1) return "stock";
+                byte[] patched = (byte[])ForceRestoreSignature.Clone();
+                foreach (var (at, _, @new) in ForceRestoreEdits) @new.CopyTo(patched, at);
+                return FindAll(patched).Count == 1 ? "applied" : "not found";
+            }
+            case BootPatch.ReformatFlash:
+            {
+                if (FindAll(FormattedMarker).Count == 1) return "stock";
+                byte[] patched = (byte[])FormattedMarker.Clone();
+                patched[^2] = (byte)'X';
+                return FindAll(patched).Count == 1 ? "applied" : "not found";
+            }
+            default:
+                return "not found";
+        }
+    }
+
     private static string Describe(FirmwareJsonEntry e) => e.Kind switch
     {
         FirmwareJsonKind.FactoryPreset => $"preset {e.Slot}",

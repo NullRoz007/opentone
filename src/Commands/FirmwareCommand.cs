@@ -14,7 +14,9 @@ public class FirmwareSettings : CommandSettings, IDeviceSettings
 public class FirmwareCommand : AmpCommand<FirmwareSettings>
 {
     protected override void Run(FenderAmp amp, FirmwareSettings s) =>
-        AnsiConsole.WriteLine(AmpActions.GetFirmware(amp));
+        AnsiConsole.Write(Ui.KeyValues("Amp")
+            .Row("Device", $"[bold]{Markup.Escape(amp.GetDeviceName() ?? "Unknown device")}[/]")
+            .Row("Firmware version", $"[bold]{Markup.Escape(AmpActions.GetFirmware(amp))}[/]"));
 }
 
 public class FirmwareUpdateSettings : CommandSettings, IDeviceSettings
@@ -54,7 +56,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
         bool interactive = AnsiConsole.Profile.Capabilities.Interactive;
         if (!interactive && !settings.Yes)
         {
-            AnsiConsole.MarkupLine("[red]Not an interactive terminal. Pass --yes to flash without the confirmation prompt.[/]");
+            Ui.Message("Not flashed", "Not an interactive terminal. Pass --yes to flash without the confirmation prompt.", Ui.Level.Error);
             return;
         }
 
@@ -68,10 +70,10 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
         {
             Flash(amp, settings, interactive);
         }
-        catch (FirmwareUpdateInterruptedException e)
+        catch (FirmwareUpdateInterruptedException)
         {
-            AnsiConsole.MarkupLine($"[red]{Markup.Escape(e.Message)}[/]");
-            AnsiConsole.MarkupLine("[yellow]The amp has started the update and is still in update mode. Run flash again with a valid image.[/]");
+            // The error itself is shown by the app's error handler.
+            Ui.Message("Amp state", "The amp has started the update and is still in update mode. Run flash again with a valid image.", Ui.Level.Warning);
             throw;
         }
         finally
@@ -85,8 +87,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
         byte[] raw = File.ReadAllBytes(settings.Path);
         var usbDevice = amp.GetUsbDevice();
         FirmwareTransport fwTransport = new(usbDevice);
-        
-        string deviceName = amp.GetDeviceName() ?? "Unknown";
+
         FenderFirmware firmware = new(raw); //throws when firmware is invalid
 
         var warning = new Panel(
@@ -101,20 +102,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
             .Padding(1, 0);
 
         AnsiConsole.Write(warning);
-        FirmwareConsole.WriteLoaded(settings.Path, firmware);
-
-        var table = new Table()
-            .Border(TableBorder.Rounded)
-            .HideHeaders()
-            .AddColumn(new TableColumn(""))
-            .AddColumn(new TableColumn(""));
-
-        table.AddRow("Device", "[green]Connected[/]");
-        table.AddRow("[grey]name[/]", $"[grey]{Markup.Escape(deviceName)}[/]");
-        table.AddRow("[grey]vid[/]", $"[grey]0x{usbDevice.VendorId:X4}[/]");
-        table.AddRow("[grey]pid[/]", $"[grey]0x{usbDevice.ProductId:X4}[/]");
-
-        AnsiConsole.Write(table);
+        Ui.FirmwareSummary(settings.Path, firmware, amp);
 
         bool confirmed = settings.Yes || AnsiConsole.Confirm("Valid firmware found, proceed with flashing?", false);
         if(confirmed) {
@@ -137,6 +125,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
                 flash.Value = 100;
                 flash.Description = "[green]Complete[/]";
             });
+            Ui.Message("Flash complete", "The amp will restart with the new firmware.", Ui.Level.Success);
         }
     }
 }
@@ -149,14 +138,14 @@ public class DumpCommand : Command<FirmwareDumpSettings>
         if (!PatchCommand.IsCapture(settings.Input))
             throw new ArgumentException($"{settings.Input} is not a PcapNG capture. To inspect or edit a firmware image, use 'patch'.");
 
-        AnsiConsole.MarkupLine($"Dumping firmware from [bold]{Markup.Escape(settings.Input)}[/]");
-        var firmware = CreateFromCapture(settings.Input);
-
-        AnsiConsole.WriteLine($"crcCalculated \t= 0x{firmware.CheckSumCalculated:X8}");
-        AnsiConsole.WriteLine($"crcExpected \t= 0x{firmware.CheckSumExpected:X8}");
-
+        var firmware = CreateFromCapture(settings.Input);   // throws if the CRC is invalid
         firmware.Save(settings.Output);
-        AnsiConsole.WriteLine($"wrote {firmware.Size} bytes to {settings.Output}");
+
+        AnsiConsole.Write(Ui.KeyValues("Dump")
+            .Row("Capture", $"[bold]{Markup.Escape(settings.Input)}[/]")
+            .Row("Size", $"{firmware.Size} bytes ({firmware.Size / 32} update frames)")
+            .Row("CRC-32", $"0x{firmware.CheckSumCalculated:X8} [green]valid[/] [grey](expected 0x{firmware.CheckSumExpected:X8})[/]")
+            .Row("Written to", $"[bold]{Markup.Escape(settings.Output)}[/]"));
         return 0;
     }
 }
