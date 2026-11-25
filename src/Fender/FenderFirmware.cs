@@ -7,6 +7,9 @@ using System.Runtime.InteropServices;
 using OpenTone.Capture;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Spectre.Console;
+using System.Text.Encodings.Web;
 
 
 namespace OpenTone
@@ -60,7 +63,7 @@ namespace OpenTone
         }
         public void SendFirmware(byte[] firmware, Action<SendFirmwareCallback>? onProgress = null, int timeout = 30000, int updateRate = 512)
         {
-            if (updateRate <= 0) throw new ArgumentOutOfRangeException(nameof(updateRate));
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(updateRate);
             if (reportSize != 64) throw new InvalidOperationException("reportSize != 64");
             if (!FenderFirmware.ValidateFirmware(firmware, out uint expected, out uint calculated))
                 throw new InvalidDataException($"Image CRC mismatch: calculated {calculated:X8}, expected {expected:X8}");
@@ -183,7 +186,7 @@ namespace OpenTone
             var stream = new MemoryStream();
             bool begun = false, ended = false;
             int nextSequence = -1;
-
+            
             foreach(var packet in packets)
             {
                 if (packet.transfer != PcapTransfer.Interrupt)          continue; 
@@ -197,6 +200,7 @@ namespace OpenTone
                 switch(command)
                 {
                     case (byte)UpdateControl.Begin:
+                        AnsiConsole.WriteLine("Got UpdateControl.Begin");
                         begun = true;
                         break;
                     case (byte)UpdateControl.Data:
@@ -206,12 +210,15 @@ namespace OpenTone
                             throw new Exception("Malformed frame. Payload length larger than expected.");
                         if(nextSequence != -1 && nextSequence != sequence) 
                             throw new Exception("A frame was dropped during capture, or the capture contains duplicate frames.");
+                        
                         nextSequence = (sequence + 1) & 0xFF;
                         stream.Write(packet.payload, 4, length);
                         break;
                     case (byte)UpdateControl.End:
                         if(begun) ended = true;
                         else throw new Exception("Got \"End\" Command Before \"Begin\"");
+
+                        AnsiConsole.WriteLine("Got UpdateControl.End");
                         break;
                     default:
                         break;
@@ -333,20 +340,19 @@ namespace OpenTone
             return results;
         }
 
-        public static FenderFirmware CreateFromCapture(FenderAmp amp, string path)
-        {
-            IUsbDevice ampDevice = amp.GetUsbDevice();
-            var addresses = new HashSet<(ushort bus, ushort device)>();
-            var pids = new HashSet<ushort> {
-                ampDevice.ProductId, 
-                FenderDevices.Known[FenderDevices.LT25].Pid, 
-                FenderDevices.Known[FenderDevices.LT_DFU].Pid 
-            };
+        public static FenderFirmware CreateFromCapture(FenderAmp amp, string path) => CreateFromCapture(path);
 
+        /// <summary>Extracts the firmware image from a capture of an official update. No amp needs to be connected.</summary>
+        public static FenderFirmware CreateFromCapture(string path)
+        {
+            ushort vendorId = FenderDevices.Known[FenderDevices.LT25].Vid;
+            var addresses = new HashSet<(ushort bus, ushort device)>();
+            var pids = FenderDevices.Known.Values.Where(id => id.Vid == vendorId).Select(id => id.Pid).ToHashSet();
             List<PcapPacket> packets = new();
-            using var reader = IReaderFactory.GetReader(path);
+            using var reader = IReaderFactory.GetReader(path); // <-- here
+
             while(reader.MoreAvailable)
-            {
+            {   
                 IPacket p = reader.ReadNextPacket();
                 if(p == null) break;
                 
@@ -358,7 +364,7 @@ namespace OpenTone
                 var pcd = ParseDeviceDescriptor(packet);
                 if(pcd != null) { // track the device address as we read packets
                     PcapDeviceDescriptor pcapDevice = pcd.Value;
-                    if(pcapDevice.VID == ampDevice.VendorId && pids.Contains(pcapDevice.PID)) addresses.Add(address);
+                    if(pcapDevice.VID == vendorId && pids.Contains(pcapDevice.PID)) addresses.Add(address);
                     else addresses.Remove(address);
                 }
 
@@ -396,66 +402,50 @@ namespace OpenTone
             File.WriteAllBytes(path, Payload);
         }
 
-        public byte[] PatchVersion(string oldString, string newString) => ReplaceString(oldString, newString);
+        // ---- Guarded patching. All edits go through FirmwarePatcher, which enforces the firmware's
+        // constraints (16-character preset names, 5-character version, in-place JSON edits) and
+        // re-validates the whole image before returning it.
 
-        public byte[] PatchDisplayName(
-            JsonString str,
-            string newDisplayName)
+        /// <summary>Replaces the version string. Both versions must be exactly 5 characters.</summary>
+        public byte[] PatchVersion(string oldString, string newString)
         {
-            byte[] jsonBytes = Encoding.UTF8.GetBytes(str.Value);
-            byte[] patched = (byte[])Payload.Clone();
-            var reader = new Utf8JsonReader(jsonBytes);
-
-            while (reader.Read())
-            {
-                // The displayName property inside the root "info" object.
-                if (reader.TokenType != JsonTokenType.PropertyName ||
-                    reader.CurrentDepth != 2 ||
-                    reader.GetString() != "displayName")
-                {
-                    continue;
-                }
-
-                if (!reader.Read() || reader.TokenType != JsonTokenType.String)
-                    throw new FormatException("displayName is not a JSON string.");
-
-                int valueOffset = (int)reader.TokenStartIndex;
-                int valueLength = (int)(reader.BytesConsumed - reader.TokenStartIndex);
-
-                // Serialize the replacement as a JSON string, including quotes.
-                byte[] replacement = Encoding.UTF8.GetBytes(
-                    JsonSerializer.Serialize(newDisplayName)
-                );
-
-                if (replacement.Length != valueLength)
-                {
-                    throw new InvalidOperationException(
-                        $"Replacement is {replacement.Length} bytes, " +
-                        $"but the original displayName occupies {valueLength} bytes."
-                    );
-                }
-
-                int firmwareOffset = str.Offset + valueOffset;
-
-                Buffer.BlockCopy(
-                    replacement,
-                    0,
-                    patched,
-                    firmwareOffset,
-                    replacement.Length
-                );
-
-                ValidateFirmware(patched, out _, out uint crc); //checksum stored in patched is stale so this fails, but we need the value of crc
-                BinaryPrimitives.WriteUInt32LittleEndian(patched.AsSpan(patched.Length - 4), crc);
-
-                if (!ValidateFirmware(patched, out _, out _))
-                    throw new InvalidOperationException("Patched image failed CRC validation");
-
-                return patched;
-            }
-
-            throw new FormatException("Could not find info.displayName.");
+            var patcher = new FirmwarePatcher(Payload);
+            if (patcher.Version != oldString)
+                throw new ArgumentException($"Current version is '{patcher.Version}', not '{oldString}'.");
+            patcher.SetVersion(newString);
+            return patcher.Build();
         }
+
+        /// <summary>
+        /// Changes one value of a preset or model found by <see cref="FindJsonStrings"/>.
+        /// <paramref name="target"/> is "info" (only displayName is supported) or a node id
+        /// (stomp, mod, amp, delay, reverb); for a model it is ignored and the default is changed.
+        /// </summary>
+        public byte[] PatchParam(JsonString preset, string target, string paramId, string value)
+        {
+            var patcher = new FirmwarePatcher(Payload);
+            var entry = patcher.GetEntryAt(preset.Offset);
+
+            if (entry.Kind == FirmwareJsonKind.Model)
+                patcher.SetModelDefault(entry, paramId, value);
+            else if (target == "info" && paramId == "displayName")
+                patcher.SetPresetName(entry, value);
+            else if (target == "info")
+                throw new NotSupportedException($"Only info.displayName can be changed, not info.{paramId}.");
+            else
+                patcher.SetPresetParam(entry, target, paramId, value);
+
+            return patcher.Build();
+        }
+
+        /// <summary>Renames a preset. The name must be exactly 16 characters of A-Z, 0-9 and space.</summary>
+        public byte[] PatchDisplayName(JsonString preset, string newDisplayName)
+        {
+            var patcher = new FirmwarePatcher(Payload);
+            patcher.SetPresetName(patcher.GetEntryAt(preset.Offset), newDisplayName);
+            return patcher.Build();
+        }
+
         public byte[] ReplaceString(string oldString, string newString)
         {
             byte[] oldBytes = Encoding.ASCII.GetBytes(oldString);

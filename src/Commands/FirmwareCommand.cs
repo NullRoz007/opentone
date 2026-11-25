@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Text.Json;
 using OpenTone;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -33,19 +32,19 @@ public class FirmwareUpdateSettings : CommandSettings, IDeviceSettings
     public bool Yes { get; init; }
 }
 
-public class FirmwareDumpSettings : CommandSettings, IDeviceSettings
+public class FirmwareDumpSettings : CommandSettings
 {
     [CommandArgument(0, "<input>")]
     [Description("Path of a WireShark PcapNG capture taken during a firmware update.")]
     public required string Input { get; init; }
-    
-    [CommandArgument(0, "<output>")]
+
+    [CommandArgument(1, "<output>")]
     [Description("Path to save the dumped firmware.")]
     public required string Output { get; init; }
-    
+
     [CommandOption("-d|--device")]
-    [Description("Target device")]
-    public required string Device { get; init; }
+    [Description("Not needed any more; accepted for compatibility.")]
+    public string? Device { get; init; }
 }
 
 public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
@@ -148,23 +147,22 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
     }
 }
 
-public class DumpCommand : AmpCommand<FirmwareDumpSettings>
+/// <summary>Extracts the firmware image from a capture of an official update. Use "patch" to inspect or edit it.</summary>
+public class DumpCommand : Command<FirmwareDumpSettings>
 {
-    protected override void Run(FenderAmp amp, FirmwareDumpSettings settings)
+    public override int Execute(CommandContext context, FirmwareDumpSettings settings, CancellationToken cancellation)
     {
-        AnsiConsole.WriteLine($"Dumping {amp.GetDeviceName()} firmware from {settings.Input}");
-        var firmware = CreateFromCapture(amp, settings.Input);
-        var stringRefs = FindJsonStrings(firmware.Payload);
-        foreach(var str in stringRefs)
-        {
-            FenderPreset preset = FenderPreset.Parse(str.Value);
-            AnsiConsole.WriteLine($"0x{str.Offset.ToString("X")} = {preset.Info.DisplayName}");
-        }
+        if (!PatchCommand.IsCapture(settings.Input))
+            throw new ArgumentException($"{settings.Input} is not a PcapNG capture. To inspect or edit a firmware image, use 'patch'.");
 
-        AnsiConsole.WriteLine($"crcCalculated \t= 0x{firmware.CheckSumCalculated.ToString("X")}");
-        AnsiConsole.WriteLine($"crcExpected \t= 0x{firmware.CheckSumExpected.ToString("X")}");
-        
+        AnsiConsole.MarkupLine($"Dumping firmware from [bold]{Markup.Escape(settings.Input)}[/]");
+        var firmware = CreateFromCapture(settings.Input);
+
+        AnsiConsole.WriteLine($"crcCalculated \t= 0x{firmware.CheckSumCalculated:X8}");
+        AnsiConsole.WriteLine($"crcExpected \t= 0x{firmware.CheckSumExpected:X8}");
+
         firmware.Save(settings.Output);
         AnsiConsole.WriteLine($"wrote {firmware.Size} bytes to {settings.Output}");
+        return 0;
     }
 }

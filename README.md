@@ -39,7 +39,8 @@ Every command except `list` needs `-d, --device <device>`. Run `opentone list` t
 | `get <type> <arg1> [arg2]` | Read `param <node> <param>`, `preset <slot>` or `node <node>` |
 | `set <type> <arg1> [arg2] [arg3]` | Set `param <node> <param> <value>`, `preset <slot>` or `model <node> <model>` |
 | `dump <input> <output>` | Extract the firmware from a capture and save it |
-| `flash <path>` | Flash a firmware file (update mode only) |
+| `patch <input> [output] [options]` | Inspect a firmware image or write a patched copy (see below) |
+| `flash <path>` | Flash a firmware file (update mode only). `--yes` skips the prompt |
 
 Nodes are `stomp`, `mod`, `amp`, `delay` and `reverb`.
 
@@ -65,10 +66,35 @@ The messages used by the WebSocket server are documented in [WebSocket messages]
 Capture an official Fender Tone update with Wireshark and USBPcap (Windows). Select the USB root hub the amp is on, enable capture from newly connected devices, and start the capture before you put the amp in update mode. Then:
 
 ```
-opentone dump update-capture.pcapng firmware.bin -d <device>
+opentone dump update-capture.pcapng firmware.bin
 ```
 
-This lists the embedded presets found in the image, prints the calculated and expected CRC and saves the image.
+This checks the CRC and saves the image. No amp needs to be connected.
+
+### Patching firmware
+
+`patch` inspects and edits an image (a `.bin`, or a capture directly). Every edit is checked against the rules the firmware relies on, and the result is re-validated before it is written. See [firmware map](docs/mustang-lt25-firmware-map.md) for the rules.
+
+| Option | Effect |
+|---|---|
+| `--list` | Factory presets (slots 1-30 and the `empty` template for 31-60), version, models and images |
+| `--show <slot\|empty\|model>` | Parameters with their current values and allowed values |
+| `--rename SLOT=NAME` | Rename a preset. Names are 16 characters of A-Z, 0-9 and space; shorter names are padded. `LINE1\|LINE2` pads each half to 8 |
+| `--set SLOT:NODE.PARAM=VALUE` | Change a preset parameter, keeping its type and the model's range |
+| `--model-default MODEL.PARAM=VALUE` | Change the default value a model gets when selected |
+| `--pull AMPSLOT[=FWSLOT]` | Read a preset from the amp (1-60 or `current`, normal mode) and write it into a firmware slot |
+| `--import FWSLOT=FILE` | The same, from a preset JSON file |
+| `--export-image NAME=FILE` / `--image NAME=FILE` | Save or replace a bitmap (`splash`: the 128x43 startup logo, `tone`: 66x58) as 24-bit BMP. Same size only |
+| `--fw-version X.Y.Z` | Change the version string (exactly 5 characters) |
+| `--force-restore` | Boot patch: restore all presets from the factory set on every boot. Flash stock firmware afterwards |
+| `--reformat-flash` | Boot patch: erase the data flash (presets and settings) on the next boot |
+| `--dry-run` | Validate without writing |
+
+```
+opentone patch lt25-2.1.4.bin custom.bin --rename "2=MY|LEAD" --set 2:amp.gain=0.8 --image splash=logo.bmp
+```
+
+Factory presets only reach the amp's preset memory through a factory restore (Settings > Factory Restore, or `--force-restore`). A preset that would grow past its slot's space in the image is refused.
 
 ### Flashing firmware
 
