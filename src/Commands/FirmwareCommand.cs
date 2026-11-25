@@ -86,10 +86,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
         var usbDevice = amp.GetUsbDevice();
         FirmwareTransport fwTransport = new(usbDevice);
         
-        uint expected = 0, calculated = 0;
         string deviceName = amp.GetDeviceName() ?? "Unknown";
-        bool isValid = ValidateFirmware(raw, out expected, out calculated);
-
         FenderFirmware firmware = new(raw); //throws when firmware is invalid
 
         var warning = new Panel(
@@ -104,6 +101,7 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
             .Padding(1, 0);
 
         AnsiConsole.Write(warning);
+        FirmwareConsole.WriteLoaded(settings.Path, firmware);
 
         var table = new Table()
             .Border(TableBorder.Rounded)
@@ -111,10 +109,6 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
             .AddColumn(new TableColumn(""))
             .AddColumn(new TableColumn(""));
 
-        table.AddRow("Firmware CRC", isValid ? "[green]Valid[/]" : "[red]Invalid[/]");
-        table.AddRow("[grey]calculated[/]", $"[grey]0x{firmware.CheckSumCalculated:X8}[/]");
-        table.AddRow("[grey]expected[/]",   $"[grey]0x{firmware.CheckSumExpected:X8}[/]");
-        table.AddEmptyRow();
         table.AddRow("Device", "[green]Connected[/]");
         table.AddRow("[grey]name[/]", $"[grey]{Markup.Escape(deviceName)}[/]");
         table.AddRow("[grey]vid[/]", $"[grey]0x{usbDevice.VendorId:X4}[/]");

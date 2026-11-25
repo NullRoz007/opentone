@@ -1,18 +1,10 @@
-using System.Reflection.Metadata;
 using OpenTone;
-using Spectre.Console.Cli.Help;
 
 public sealed class TuiCommandRegistry
 {
     private readonly Dictionary<string, Func<FenderAmp, string[], string>> _handlers = new()
     {
         ["firmware"]  = (amp, _) => AmpActions.GetFirmware(amp),
-        ["getpreset"] = (amp, a) => AmpActions.GetPreset(amp, int.Parse(a[0])),
-        ["setpreset"] = (amp, a) => AmpActions.SetPreset(amp, int.Parse(a[0])),
-        ["viewnode"]  = (amp, a) => AmpActions.ViewNode(amp, a[0]),
-        ["setparam"] = (amp, a) => AmpActions.SetParamAuto(amp, a[0], a[1], a[2]),
-        ["getparam"] = (amp, a) => AmpActions.GetParam(amp, a[0], a[1]),
-        ["setmodel"] = (amp, a) => AmpActions.SetModel(amp, a[0], a[1]),
         ["get"] = (amp, a) =>
         {
             switch(a[0])

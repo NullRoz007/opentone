@@ -79,7 +79,7 @@ public class PatchCommand : Command<PatchSettings>
     public override int Execute(CommandContext context, PatchSettings settings, CancellationToken cancellation)
     {
         var firmware = Load(settings.Input);
-        AnsiConsole.MarkupLine($"Loaded [bold]{Markup.Escape(settings.Input)}[/]: {firmware.Size} bytes, CRC 0x{firmware.CheckSumCalculated:X8} [green]valid[/]");
+        FirmwareConsole.WriteLoaded(settings.Input, firmware);
 
         var patcher = new FirmwarePatcher(firmware.Payload);
         foreach (var problem in patcher.Problems) AnsiConsole.MarkupLine($"[red]warning:[/] {Markup.Escape(problem)}");
