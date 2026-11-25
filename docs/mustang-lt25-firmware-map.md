@@ -44,10 +44,10 @@ Helpers: `0x8102c30(out, writer, slot)` reads a slot (empty string if blank). `0
 | `0x81263b0` | Boot splash. Calls `checkPresetRestore(force)` at `0x8102258`. It restores all presets when forced, otherwise only blank slots, and shows `RESTORESPLASH` "PRESET nn / 60" |
 | Factory preset table | `0x81bb7c0`: 30 pointers to preset JSON. Slots 31–60 use the `EMPTY` template at `0x81a6708` |
 
-Boot-time patches built and checked for CRC (not yet run on hardware):
+Boot-time patches (`opentone patch --force-restore` / `--reformat-flash`):
 
-- `lt25-2.1.4-force-restore.bin`: `0x80fa8f6` `cbz` becomes `nop`, and `0x80fa904` becomes `movs r6,#1`. The force flag is then always set, so every boot restores all presets.
-- `lt25-2.1.4-reformat-flash.bin`: changes the marker string to `...FORMATTEX`. The first boot erases the data flash.
+- Force restore: `0x80fa8f6` `cbz` becomes `nop`, and `0x80fa904` becomes `movs r6,#1`. The force flag is then always set, so every boot restores all presets. **Tested on hardware:** it recovered an amp bricked by a malformed preset (a 4-character name in compact JSON).
+- Reformat flash: changes the marker string to `...FORMATTEX`. The first boot erases the data flash. Not yet run on hardware.
 
 ## USB request dispatch
 

@@ -164,14 +164,40 @@ public sealed class FirmwarePatcher
     private int ToOffset(uint address) =>
         address >= LoadAddress && address < LoadAddress + image.Length - 4 ? (int)(address - LoadAddress) : -1;
 
-    /// <summary>Every 2-byte-aligned 32-bit word that points into the image.</summary>
+    /// <summary>
+    /// Addresses inside the image that are really referenced as data pointers. A word counts only if it is
+    /// 4-byte aligned (literal pools and tables are) and is either loaded by a PC-relative ldr or sits next
+    /// to another pointer (a table). Any 32-bit pattern can occur by chance in code or float data, and
+    /// counting those made presets 6 and 24 of 2.1.4 look referenced from inside their text.
+    /// </summary>
     private HashSet<uint> CollectPointers(byte[] data)
     {
+        uint end = LoadAddress + (uint)data.Length;
+        bool IsPointer(uint v) => (v >= LoadAddress && v < end) || (v >= 0x20000000 && v < 0x24080000);
+
+        // Literal-pool slots loaded by "ldr rX, [pc, #imm]" (16-bit) or "ldr.w rX, [pc, #+/-imm12]".
+        var literals = new HashSet<uint>();
+        for (int i = 0; i + 4 <= data.Length; i += 2)
+        {
+            ushort hw = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(i));
+            uint pc = (LoadAddress + (uint)i + 4) & ~3u;
+            if ((hw & 0xF800) == 0x4800) literals.Add(pc + (uint)((hw & 0xFF) * 4));
+            else if (hw is 0xF8DF or 0xF85F)
+            {
+                int imm = BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(i + 2)) & 0xFFF;
+                literals.Add(hw == 0xF8DF ? pc + (uint)imm : pc - (uint)imm);
+            }
+        }
+
         var set = new HashSet<uint>();
-        for (int i = 0; i + 4 <= data.Length - 4; i += 2)
+        for (int i = 0; i + 4 <= data.Length - 4; i += 4)
         {
             uint v = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(i));
-            if (v >= LoadAddress && v < LoadAddress + data.Length) set.Add(v);
+            if (v < LoadAddress || v >= end) continue;
+            bool referenced = literals.Contains(LoadAddress + (uint)i)
+                || (i >= 4 && IsPointer(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(i - 4))))
+                || (i + 8 <= data.Length && IsPointer(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(i + 4))));
+            if (referenced) set.Add(v);
         }
         return set;
     }
@@ -425,14 +451,28 @@ public sealed class FirmwarePatcher
 
         if (kind == JsonValueKind.Number)
         {
-            if (ui?["min"] is JsonValue mn && ui["max"] is JsonValue mx)
-                return new ParamRule(kind, mn.GetValue<double>(), mx.GetValue<double>(), integerOnly, null, "model UI range");
-
-            if (ui?["listItems"] is JsonArray items)
-                return new ParamRule(kind, 0, items.Count - 1, true, null, "list index");
-
             var values = Observed(fenderId, param).Where(v => v.GetValueKind() == JsonValueKind.Number)
                 .Select(v => v.GetValue<double>()).ToList();
+
+            // The factory data itself sometimes goes outside the UI range (2.1.4's CLASSIC ROCK has
+            // Plexi87 mid = -4.400125 with a 0..1 knob), and the firmware ships it, so the allowed range
+            // always includes every value the factory data uses for this model's parameter.
+            var factory = observed.TryGetValue((fenderId, param), out var own)
+                ? own.Where(v => v.GetValueKind() == JsonValueKind.Number).Select(v => v.GetValue<double>()).ToList()
+                : new List<double>();
+
+            if (ui?["min"] is JsonValue mn && ui["max"] is JsonValue mx)
+            {
+                double lo = mn.GetValue<double>(), hi = mx.GetValue<double>();
+                bool widened = factory.Count > 0 && (factory.Min() < lo || factory.Max() > hi);
+                return widened
+                    ? new ParamRule(kind, Math.Min(lo, factory.Min()), Math.Max(hi, factory.Max()), integerOnly, null, "model UI range, widened to factory values")
+                    : new ParamRule(kind, lo, hi, integerOnly, null, "model UI range");
+            }
+
+            if (ui?["listItems"] is JsonArray items)
+                return new ParamRule(kind, 0, Math.Max(items.Count - 1, factory.Count > 0 ? factory.Max() : 0), true, null, "list index");
+
             if (values.Count == 0) return new ParamRule(JsonValueKind.Undefined, null, null, false, null, "no reference values");
             if (values.All(v => v >= 0 && v <= 1)) return new ParamRule(kind, 0, 1, integerOnly, null, "factory values are 0..1");
             return new ParamRule(kind, values.Min(), values.Max(), integerOnly, null, "range seen in factory data");
