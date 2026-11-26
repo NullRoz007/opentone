@@ -138,7 +138,7 @@ public class PatchCommand : Command<PatchSettings>
             {
                 var (name, file) = Split(spec, '=', "--export-image", "NAME=FILE");
                 var img = patcher.GetImage(name);
-                FenderBmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
+                Bmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
                 exported.AddRow(Markup.Escape(img.Name), $"{img.Width}x{img.Height}", $"[bold]{Markup.Escape(file)}[/]");
             }
             AnsiConsole.Write(exported);
@@ -147,7 +147,7 @@ public class PatchCommand : Command<PatchSettings>
         foreach (var spec in settings.Image)
         {
             var (name, file) = Split(spec, '=', "--image", "NAME=FILE");
-            var (w, h, px) = FenderBmp.Read(file);
+            var (w, h, px) = Bmp.Read(file);
             patcher.WriteImage(patcher.GetImage(name), w, h, px, Path.GetFileName(file));
         }
 
