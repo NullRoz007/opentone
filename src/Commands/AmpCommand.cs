@@ -17,9 +17,16 @@ public interface IDeviceSettings
         {
             using var amp = FenderAmp.Connect(settings.Device);
             if(amp.GetDeviceName() != FenderDevices.LT_UPDATER_DEVICE_NAME) {
+                // 113 {1:0} starts a sync and 113 {1:1} ends it. Without the second message the amp
+                // shows "syncing with Fender Tone" until it times out.
                 if (amp.Hello() == null)
                 {
                     Ui.Message("Error", "No reply to hello. Close Fender Tone and check the amp is connected and in normal mode.", Ui.Level.Error);
+                    return 1;
+                }
+                if (amp.Sync() == null)
+                {
+                    Ui.Message("Error", "No reply to sync. Close Fender Tone and check the amp is connected and in normal mode.", Ui.Level.Error);
                     return 1;
                 }
             }

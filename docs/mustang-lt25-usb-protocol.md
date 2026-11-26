@@ -47,7 +47,7 @@ Amp to host (EP 0x81):  [0x00][type][len][payload ... len bytes][padding]
 
 ## Messages (normal mode)
 
-Payload is protobuf wire format, no schema available, so field numbers are read from the wire.
+Payload is protobuf wire format. The full schema is in the firmware; see [Schema](#schema-from-the-firmware) below.
 
 | Field | Meaning |
 |---|---|
@@ -78,6 +78,83 @@ OUT  35 07 | 08 00 ca 06 02 08 05                    105 {1:5}  (preset slot 5)
 ```
 
 Preset responses (field 31) are 32 to 42 frames. Length check on slot 1: field 31 is 2,137 bytes = 3 (header `0a d4 10`) + 2,132 (JSON) + 2 (`10 01`).
+
+### Schema (from the firmware)
+
+The firmware uses nanopb 0.3 with 32-bit field descriptors. Its top-level message descriptor is at `0x8184bc8` (decoded in `decodeMessage` at `0x8103910`), so the whole message set can be read from the image instead of guessed from captures. Every message is `{1: uint8 envelope, oneof { one field per command }}`. In memory it is a 0xfb0-byte struct: the envelope is at `+0`, the field number of the oneof (`which`) at `+4`, and the sub-message at `+8`. `bytes[n]` is `{u32 size; u8 data[n]}`.
+
+"Handled" means the request dispatcher (`0x8107f78`) has a case for it. Every other field number decodes, then gets the field 200 `{1: 0}` reply. Meanings are only given where the captures or the code show them.
+
+| Field | Sub-message fields | Handled | Meaning |
+|---|---|---|---|
+| 2 | 1: int32; 2: fixed32/float |  |  |
+| 3 | 1: int32; 2: uint8; 3: optional uint32 | yes |  |
+| 4 | 1: int32; 2: int32 | yes |  |
+| 5 | 1: string[32] | yes |  |
+| 6 | 1: int8 | yes |  |
+| 7 | 1: fixed32/float; 2: fixed32/float; 3: fixed32/float |  |  |
+| 8 | 1: int8 | yes |  |
+| 9 | 1: int32; 2: int32 |  |  |
+| 10 | 1: int32 | yes |  |
+| 11 | 1: int8 | yes |  |
+| 12 | 1: bytes[500] |  | Unhandled by stock 2.1.4. Used by the OpenTone debug hook |
+| 13 | 1: int8 | yes |  |
+| 14 | 1: uint8 |  |  |
+| 15 | 1: int32 | yes |  |
+| 30 | 1: string[1024] | yes |  |
+| 31 | 1: string[4000]; 2: int32 |  | Preset (reply to 105) |
+| 32 | 1: string[4000]; 2: int32; 3: int8 |  | Current preset (reply to 104) |
+| 33 | 1: int32 | yes | Select preset |
+| 34 | 1: string[64]; 2: string[64]; 3: oneof fixed32/float; 4: oneof string[64]; 5: oneof sint32; 6: oneof int8 | yes | Set parameter |
+| 35 | 1: string[64]; 2: string[64]; 3: oneof fixed32/float; 4: oneof string[64]; 5: oneof sint32; 6: oneof int8 |  | Set parameter reply |
+| 36 | 1: string[64]; 2: string[64]; 3: oneof fixed32/float; 4: oneof string[64]; 5: oneof sint32; 6: oneof int8 |  |  |
+| 37 | 1: int32 |  | Select preset reply |
+| 38 | 1: int8 |  |  |
+| 39 | 1: string[64]; 2: string[64] | yes | Set model |
+| 40 | 1: string[64]; 2: string[64] |  | Set model reply |
+| 41 | 1: int32; 2: int32 | yes |  |
+| 42 | 1: int32; 2: int32 |  |  |
+| 43 | 1: int32; 2: int32 | yes |  |
+| 44 | 1: int32; 2: int32 |  |  |
+| 45 | 1: string[4000] | yes |  |
+| 46 | 1: int32; 2: repeated int8 (max 4) |  |  |
+| 47 | 1: int32 |  |  |
+| 50 | 1: string[17]; 2: int32 |  |  |
+| 51 | 1: int32; 2: int8 | yes |  |
+| 52 | 1: int32 |  |  |
+| 53 | 1: int8 | yes |  |
+| 54 | 1: string[17]; 2: int32 | yes |  |
+| 55 | 1: string[4000]; 2: int8; 3: int32 | yes |  |
+| 56 | 1: string[4000]; 2: int32 |  |  |
+| 57 | 1: string[17]; 2: int32 | yes |  |
+| 58 | 1: string[4000] | yes |  |
+| 59 | 1: string[4000] |  |  |
+| 60 | 1: int8 | yes |  |
+| 61 | 1: int8 |  |  |
+| 62 | 1: int8 | yes | Status query |
+| 63 | 1: int8 |  | Reply to 62 |
+| 100 | 1: string[64] |  |  |
+| 101 | 1: int8 | yes |  |
+| 102 | 1: int8 | yes | Firmware version request |
+| 103 | 1: string[64] |  | Firmware version reply |
+| 104 | 1: int8 | yes | Current preset request |
+| 105 | 1: int32 | yes | Read preset slot |
+| 106 | 1: int8 | yes | Status query |
+| 107 | 1: fixed32/float |  | Reply to 106 |
+| 108 | 1: int8 | yes | Status query |
+| 109 | 1: repeated uint32 (max 8) |  | Reply to 108 |
+| 110 | 1: int8 | yes |  |
+| 111 | 1: fixed32/float |  |  |
+| 113 | 1: uint8; 2: uint8 | yes | Hello / sync done |
+| 114 | 1: fixed32/float | yes |  |
+| 115 | 1: fixed32/float | yes |  |
+| 116 | 1: repeated uint32 (max 8) | yes |  |
+| 200 | 1: uint8 |  | Status reply. Stock firmware sends {1: 0} for unhandled requests |
+| 201 | 1: int8 | yes | Keepalive |
+| 202 | 1: int8 | yes | Status query |
+| 203 | 1: int8 |  | Reply to 202 |
+
+Field 34/35/36 have the same layout: node ID, parameter ID, then the value as a oneof of float (3), string (4), sint32 (5) or bool (6).
 
 ## Startup sequence
 

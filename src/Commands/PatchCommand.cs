@@ -71,6 +71,10 @@ public class PatchSettings : CommandSettings
     [Description("Replace a firmware image (splash, tone) with a 24- or 32-bit BMP of exactly the same size. Repeatable.")]
     public string[] Image { get; init; } = [];
 
+    [CommandOption("--hook <FIELD=FILE>")]
+    [Description("Compile a C hook (see hooks/opentone.h) and install it on an unhandled message field, e.g. 12=hooks/debug.c. Needs arm-none-eabi-gcc. Repeatable. 'patch --info' lists the free fields.")]
+    public string[] Hook { get; init; } = [];
+
     [CommandOption("--dry-run")]
     [Description("Apply and validate the changes, but don't write the output.")]
     public bool DryRun { get; init; }
@@ -133,7 +137,7 @@ public class PatchCommand : Command<PatchSettings>
         // Export before replacing, so --export-image always saves what the input contains.
         if (settings.ExportImage.Length > 0)
         {
-            var exported = Ui.Table("Exported images", "Image", "Size", "File");
+            var exported = Ui.Table("Image", "Size", "File").Title("Exported images");
             foreach (var spec in settings.ExportImage)
             {
                 var (name, file) = Split(spec, '=', "--export-image", "NAME=FILE");
@@ -151,6 +155,24 @@ public class PatchCommand : Command<PatchSettings>
             patcher.WriteImage(patcher.GetImage(name), w, h, px, Path.GetFileName(file));
         }
 
+        if (settings.Hook.Length > 0)
+        {
+            var hooks = settings.Hook.Select(spec =>
+            {
+                var (field, file) = Split(spec, '=', "--hook", "FIELD=FILE");
+                if (!int.TryParse(field, out int f)) throw new ArgumentException($"--hook expects a field number, got '{field}'.");
+                if (!File.Exists(file)) throw new FileNotFoundException($"Hook source not found: {file}", file);
+                return (Field: f, File: file);
+            }).ToList();
+            var (_, _, symbols) = patcher.HookTarget();      // first: refuses unknown or already-hooked images
+            var slots = patcher.HookSlots();
+            foreach (var h in hooks)
+                if (!slots.ContainsKey(h.Field))
+                    throw new ArgumentException($"{h.File}: field {h.Field} can't be hooked. Free fields: {string.Join(", ", slots.Keys.Order())}.");
+            byte[] code = CompileHooks(hooks, slots, symbols);
+            patcher.InstallHooks(code, hooks.Select(h => (h.Field, Path.GetFileName(h.File))).ToList());
+        }
+
         if (settings.FirmwareVersion != null) patcher.SetVersion(settings.FirmwareVersion);
         if (settings.ForceRestore) patcher.Apply(BootPatch.ForceRestore);
         if (settings.ReformatFlash) patcher.Apply(BootPatch.ReformatFlash);
@@ -162,7 +184,7 @@ public class PatchCommand : Command<PatchSettings>
 
         if (patcher.Changes.Count > 0)
         {
-            var changes = Ui.Table("Changes", "#", "Change")
+            var changes = Ui.Table("#", "Change").Title("Changes")
                 .Caption($"[green]all checks passed[/], new CRC 0x{crc:X8}");
             for (int i = 0; i < patcher.Changes.Count; i++)
                 changes.AddRow((i + 1).ToString(), Markup.Escape(patcher.Changes[i]));
@@ -185,6 +207,83 @@ public class PatchCommand : Command<PatchSettings>
             .Row("Size", $"{result.Length} bytes")
             .Row("CRC-32", $"0x{crc:X8} [green]valid[/]"));
         return 0;
+    }
+
+    /// <summary>
+    /// Compiles and links the hooks into one blob for the address in <paramref name="symbols"/> (OT_BASE),
+    /// with arm-none-eabi-gcc. The runtime (opentone.h, runtime/) is taken from the first hook's folder if it
+    /// has one, otherwise ./hooks. Each hook gets OT_HOOK_FIELD, OT_HOOK_NAME and its slot's sizes, and a
+    /// generated table maps field numbers to hooks for runtime/entry.S.
+    /// </summary>
+    private static byte[] CompileHooks(List<(int Field, string File)> hooks,
+        IReadOnlyDictionary<int, (int Size, int? BytesMax)> slots, IReadOnlyDictionary<string, uint> symbols)
+    {
+        string runtime = new[] { Path.GetDirectoryName(Path.GetFullPath(hooks[0].File))!, Path.GetFullPath("hooks") }
+            .FirstOrDefault(d => File.Exists(Path.Combine(d, "opentone.h")) && File.Exists(Path.Combine(d, "runtime", "hooks.ld")))
+            ?? throw new FileNotFoundException("Hook runtime not found: put hooks next to opentone.h and runtime/, or run from the OpenTone folder (./hooks).");
+
+        string work = Directory.CreateTempSubdirectory("opentone-hooks-").FullName;
+        try
+        {
+            string[] cpu = ["-mcpu=cortex-m7", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv5-d16"];
+            string[] cflags = [.. cpu, "-Os", "-std=gnu11", "-ffreestanding", "-fno-common", "-ffunction-sections", "-fdata-sections",
+                "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-Wall", "-Wextra", "-I", runtime];
+            var objects = new List<string>();
+            string Compile(string source, string name, params string[] extra)
+            {
+                string obj = Path.Combine(work, name + ".o");
+                RunTool("arm-none-eabi-gcc", [.. cflags, .. extra, "-c", source, "-o", obj]);
+                objects.Add(obj);
+                return obj;
+            }
+
+            Compile(Path.Combine(runtime, "runtime", "entry.S"), "entry");
+            Compile(Path.Combine(runtime, "runtime", "runtime.c"), "runtime");
+            foreach (var (field, file) in hooks)
+            {
+                var (size, bytesMax) = slots[field];
+                Compile(Path.GetFullPath(file), $"hook_{field}", $"-DOT_HOOK_FIELD={field}", $"-DOT_HOOK_NAME=ot_hook_{field}",
+                    $"-DOT_SLOT_SIZE={size}", $"-DOT_SLOT_BYTES_MAX={bytesMax ?? 0}");
+            }
+
+            string table = Path.Combine(work, "table.c");
+            File.WriteAllText(table,
+                "#define OT_HOOK_FIELD 0\n#define OT_HOOK_NAME ot_table_unused\n#include \"opentone.h\"\n" +
+                string.Concat(hooks.Select(h => $"void ot_hook_{h.Field}(ot_manager *, const ot_message *);\n")) +
+                "const struct { uint32_t field; void (*hook)(ot_manager *, const ot_message *); } ot_hooks[]\n" +
+                "    __attribute__((section(\".rodata.ot_hooks\"), used)) = {\n" +
+                string.Concat(hooks.Select(h => $"    {{ {h.Field}, ot_hook_{h.Field} }},\n")) +
+                "    { 0, 0 },\n};\n");
+            Compile(table, "table");
+
+            string elf = Path.Combine(work, "hooks.elf"), bin = Path.Combine(work, "hooks.bin");
+            RunTool("arm-none-eabi-gcc", [.. cpu, "-nostdlib", "-nostartfiles", "-T", Path.Combine(runtime, "runtime", "hooks.ld"),
+                "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
+                .. symbols.Select(kv => $"-Wl,--defsym={kv.Key}=0x{kv.Value:x8}"), .. objects, "-lgcc", "-o", elf]);
+            RunTool("arm-none-eabi-objcopy", ["-O", "binary", "-j", ".text", elf, bin]);
+            return File.ReadAllBytes(bin);
+        }
+        finally
+        {
+            try { Directory.Delete(work, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static void RunTool(string tool, IEnumerable<string> args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(tool) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        System.Diagnostics.Process p;
+        try { p = System.Diagnostics.Process.Start(psi)!; }
+        catch (Win32Exception)
+        {
+            throw new FileNotFoundException($"{tool} not found. Install the Arm GNU toolchain (e.g. 'scoop install gcc-arm-none-eabi') and put it on PATH.");
+        }
+        var stdout = p.StandardOutput.ReadToEndAsync();
+        string stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        if (p.ExitCode != 0)
+            throw new InvalidOperationException($"{tool} failed:\n{(stderr + stdout.Result).Trim()}");
     }
 
     /// <summary>True if the file starts with the PcapNG section header magic.</summary>
@@ -229,7 +328,7 @@ public class PatchCommand : Command<PatchSettings>
         using var amp = FenderAmp.Connect(device);
         if (amp.Hello() == null) throw new IOException("No reply to hello. Close Fender Tone and check the amp is in normal mode.");
 
-        var read = Ui.Table("Read from amp", "Source", "Name", "Firmware slot");
+        var read = Ui.Table("Source", "Name", "Firmware slot").Title("Read from amp");
 
         foreach (var r in requests)
         {
@@ -302,6 +401,11 @@ public class PatchCommand : Command<PatchSettings>
              .Row("Handled fields", Markup.Escape(string.Join(", ", reqs.Select(r => r.Name != null ? $"{r.Field} ({r.Name})" : r.Field.ToString()))));
         }
         else t.Row("Request dispatcher", "[grey]not recognised[/]");
+        if (info.UsbSchema is { } schema)
+            t.Row("Protobuf schema", $"{schema.Count} message fields")
+             .Row("Hook slots (--hook)", info.HookSlots.Count > 0
+                ? Markup.Escape(string.Join(", ", info.HookSlots.Select(f => schema.First(s => s.Field == f) is var s && s.BytesMax is { } n ? $"{f} (bytes[{n}])" : f.ToString())))
+                : "[grey]none (already hooked, or not recognised)[/]");
         AnsiConsole.Write(t);
 
         Ui.Section("Boot and data flash");
@@ -316,7 +420,7 @@ public class PatchCommand : Command<PatchSettings>
         AnsiConsole.Write(PresetTable(p));
 
         Ui.Section("Models");
-        var models = Ui.Table($"{p.Models.Count} defined", "Menu", "Name on amp", "Model", "Params", "Defined");
+        var models = Ui.Table("Menu", "Name on amp", "Model", "Params", "Defined").Title($"{p.Models.Count} defined");
         foreach (var e in info.Catalogue)
         {
             int parameters = e.Defined ? p.GetParameters(p.Models[e.FenderId]).Count : 0;
@@ -379,8 +483,8 @@ public class PatchCommand : Command<PatchSettings>
             ? patcher.GetPreset(target)
             : patcher.GetModel(target);
 
-        var table = Ui.Table($"{entry.Label.TrimEnd()} ({entry.Kind}, {entry.Length} bytes, {entry.Capacity - entry.Length} spare)",
-            "Node", "Model", "Param", "Value", "Allowed");
+        var table = Ui.Table("Node", "Model", "Param", "Value", "Allowed")
+            .Title(Markup.Escape($"{entry.Label.TrimEnd()} ({entry.Kind}, {entry.Length} bytes, {entry.Capacity - entry.Length} spare)"));
         foreach (var p in patcher.GetParameters(entry))
             table.AddRow(Markup.Escape(p.NodeId), Markup.Escape(p.FenderId.Replace("DUBS_", "")), Markup.Escape(p.Param),
                 Markup.Escape(p.Value), $"[grey]{Markup.Escape(p.Rule.Describe())}[/]");

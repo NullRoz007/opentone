@@ -33,6 +33,13 @@ namespace OpenTone
 
         ModelSetRequest   = 39,
         ModelSetReply = 40,
+
+        // {1: bytes[500]}. Defined in the firmware's schema but not handled by stock 2.1.4; the OpenTone
+        // debug hook (PEEK/POKE/CALL) uses it in both directions. See docs/mustang-lt25-firmware-map.md.
+        Debug = 12,
+
+        // {1: uint8}. Generic status reply; stock firmware answers unhandled requests with {1: 0}.
+        Status = 200,
     }
 
     /// <summary>Wire-level constants and builders. No device access in here.</summary>

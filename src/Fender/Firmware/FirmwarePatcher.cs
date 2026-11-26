@@ -121,6 +121,12 @@ public sealed class FirmwarePatcher
     private readonly Dictionary<string, List<JsonNode>> observedByParam = new();
     private readonly int versionOffset;
     private readonly HashSet<BootPatch> bootPatches = new();
+    private byte[] hookCode = [];           // appended after the stock image by Build()
+
+    /// <summary>End of the MCU's 2 MB flash; appended code must fit below it.</summary>
+    public const uint FlashEnd = 0x08200000;
+    private const int MessageSize = 0xfb0;  // the firmware's top-level nanopb message
+    private const int StatusField = 200;    // generic status reply, sent by the default case
 
     public IReadOnlyList<FirmwareJsonEntry> Presets { get; }
     public FirmwareJsonEntry EmptyPreset { get; }
@@ -938,6 +944,141 @@ public sealed class FirmwarePatcher
 
     // ---- build ----------------------------------------------------------------------------------
 
+    // ---- Hooks: code appended after the image, reached from the request dispatcher's default case ----
+
+    /// <summary>
+    /// Fields that decode (they are in the firmware's protobuf schema) but have no dispatcher case, so the
+    /// stock firmware answers them with the "unsupported" status reply. Empty if the dispatcher or schema
+    /// isn't recognised, or the image already has hooks. Value: sub-message size and, for a
+    /// {1: bytes[n]} message, n.
+    /// </summary>
+    public IReadOnlyDictionary<int, (int Size, int? BytesMax)> HookSlots()
+    {
+        var empty = new Dictionary<int, (int, int?)>();
+        var handled = FirmwareInfo.ReadUsbRequests(image, out _, out uint? defaultCase);
+        var schema = FirmwareInfo.ReadUsbSchema(image);
+        if (handled == null || schema == null || defaultCase == null || IsBranchW(ToOffset(defaultCase.Value))) return empty;
+        var handledFields = handled.Select(r => r.Field).ToHashSet();
+        return schema.Where(s => !handledFields.Contains(s.Field) && s.Field != StatusField)
+            .ToDictionary(s => s.Field, s => (s.Size, s.BytesMax));
+    }
+
+    /// <summary>
+    /// Where hook code goes and the firmware addresses it links against, all found from the image's own
+    /// code: the default case (ldr r0,[r4]; bl session_active; cmp r0,#0; beq.w exit), and in its body the
+    /// status-reply builder (whose first call is operator new), send, and the sized delete.
+    /// Throws if anything doesn't match, so an unknown build is refused instead of mis-patched.
+    /// </summary>
+    public (uint Base, uint DefaultCase, IReadOnlyDictionary<string, uint> Symbols) HookTarget()
+    {
+        if (FirmwareInfo.ReadUsbRequests(image, out _, out uint? found) == null || found is not uint dflt)
+            throw new NotSupportedException("Hooks: the USB request dispatcher was not recognised. Unsupported firmware.");
+        int o = ToOffset(dflt);
+        if (IsBranchW(o)) throw new NotSupportedException("Hooks: this image already has hooks. Patch the stock image instead.");
+        if (image[o] != 0x20 || image[o + 1] != 0x68 || Half(o + 6) != 0x2800)
+            throw new NotSupportedException("Hooks: unexpected code at the dispatcher's default case. Unsupported firmware.");
+        uint gate = DecodeBl(o + 2) ?? throw new NotSupportedException("Hooks: no session check in the default case.");
+        uint exit = DecodeBeqW(o + 8) ?? throw new NotSupportedException("Hooks: no exit branch in the default case.");
+        uint resume = dflt + 12;
+
+        // The default case body: log, build status reply, send, free. Walk instructions, collecting BL targets.
+        var calls = new List<(int At, uint Target)>();
+        for (int p = o + 12; p < o + 0x70 && calls.Count < 4; p += Is32(p) ? 4 : 2)
+            if (DecodeBl(p) is uint t) calls.Add((p, t));
+        if (calls.Count < 4) throw new NotSupportedException("Hooks: unexpected default case body. Unsupported firmware.");
+        uint status = calls[1].Target, send = calls[2].Target, delete = calls[3].Target;
+        if (!image.AsSpan(calls[3].At - 4, 4).SequenceEqual(MovW(1, MessageSize)))
+            throw new NotSupportedException("Hooks: the reply is not freed with the expected size.");
+        int so = ToOffset(status);
+        int newAt = so < 0 ? -1 : image.AsSpan(so, 0x20).IndexOf(MovW(0, MessageSize));
+        uint? @new = null;                                  // first BL within a few instructions of the size
+        for (int p = so + newAt + 4; newAt >= 0 && @new == null && p < so + newAt + 0x14; p += Is32(p) ? 4 : 2)
+            @new = DecodeBl(p);
+        if (@new == null) throw new NotSupportedException("Hooks: operator new not found in the status reply builder.");
+
+        uint @base = LoadAddress + (uint)original.Length;
+        return (@base, dflt, new Dictionary<string, uint>
+        {
+            ["OT_BASE"] = @base,
+            ["fw_session_active"] = gate | 1,
+            ["fw_dispatch_exit"] = exit | 1,
+            ["fw_dispatch_resume"] = resume | 1,
+            ["fw_new"] = @new.Value | 1,
+            ["fw_sized_delete"] = delete | 1,
+            ["fw_send"] = send | 1,
+        });
+    }
+
+    /// <summary>
+    /// Installs linked hook code (from hooks/runtime/hooks.ld, entry point first) for the given slots: the
+    /// default case's first 6 bytes become b.w to the code, and Build() appends the code after the image.
+    /// </summary>
+    public void InstallHooks(byte[] code, IReadOnlyList<(int Field, string Name)> hooks)
+    {
+        if (hookCode.Length > 0) throw new InvalidOperationException("Hooks are already installed.");
+        if (code.Length == 0) throw new ArgumentException("Hook code is empty.", nameof(code));
+        var slots = HookSlots();
+        foreach (var (field, name) in hooks)
+            if (!slots.ContainsKey(field))
+                throw new ArgumentException($"{name}: field {field} can't be hooked. Free slots: {string.Join(", ", slots.Keys.Order())}.");
+        if (hooks.Select(h => h.Field).Distinct().Count() != hooks.Count)
+            throw new ArgumentException("Each field can only have one hook.");
+
+        var (@base, dflt, _) = HookTarget();
+        long end = @base + code.Length + 4;
+        if (end > FlashEnd) throw new ArgumentException($"Hook code is {code.Length} bytes; only {FlashEnd - @base - 4} fit after the image.");
+
+        int o = ToOffset(dflt);
+        EncodeBW(dflt, @base).CopyTo(image, o);
+        image[o + 4] = 0x00; image[o + 5] = 0xBF;        // nop
+        allowedRegions.Add((o, o + 6, "hook branch"));
+        hookCode = (byte[])code.Clone();
+        foreach (var (field, name) in hooks)
+            Changes.Add($"hook: field {field} handled by {name}");
+        Changes.Add($"hooks: {code.Length} bytes of code at 0x{@base:X8}, default case at 0x{dflt:X8} branches to it");
+    }
+
+    private ushort Half(int o) => BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(o));
+    private bool Is32(int o) => (Half(o) & 0xF800) is 0xE800 or 0xF000 or 0xF800;
+    private bool IsBranchW(int o) => o >= 0 && (Half(o) & 0xF800) == 0xF000 && (Half(o + 2) & 0xD000) == 0x9000;
+    private static byte[] MovW(int reg, int value) =>   // mov.w rN, #value (only the 0xfb0 form is needed)
+        value == MessageSize ? [0x4F, 0xF4, 0x7B, (byte)(0x60 | reg)] : throw new ArgumentOutOfRangeException(nameof(value));
+
+    /// <summary>Target of a BL (T1) at offset o, or null.</summary>
+    private uint? DecodeBl(int o)
+    {
+        ushort h1 = Half(o), h2 = Half(o + 2);
+        if ((h1 & 0xF800) != 0xF000 || (h2 & 0xD000) != 0xD000) return null;
+        int s = (h1 >> 10) & 1, j1 = (h2 >> 13) & 1, j2 = (h2 >> 11) & 1;
+        int i1 = ~(j1 ^ s) & 1, i2 = ~(j2 ^ s) & 1;
+        int imm = (s << 24) | (i1 << 23) | (i2 << 22) | ((h1 & 0x3FF) << 12) | ((h2 & 0x7FF) << 1);
+        if (s != 0) imm |= unchecked((int)0xFE000000);
+        return (uint)(LoadAddress + o + 4 + imm);
+    }
+
+    /// <summary>Target of a BEQ.W (T3, cond EQ) at offset o, or null.</summary>
+    private uint? DecodeBeqW(int o)
+    {
+        ushort h1 = Half(o), h2 = Half(o + 2);
+        if ((h1 & 0xFBC0) != 0xF000 || (h2 & 0xD000) != 0x8000) return null;   // cond bits 9:6 = 0000 (EQ)
+        int s = (h1 >> 10) & 1, j1 = (h2 >> 13) & 1, j2 = (h2 >> 11) & 1;
+        int imm = (s << 20) | (j2 << 19) | (j1 << 18) | ((h1 & 0x3F) << 12) | ((h2 & 0x7FF) << 1);
+        if (s != 0) imm |= unchecked((int)0xFFE00000);
+        return (uint)(LoadAddress + o + 4 + imm);
+    }
+
+    /// <summary>B.W (T4) from <paramref name="from"/> to <paramref name="to"/>.</summary>
+    private static byte[] EncodeBW(uint from, uint to)
+    {
+        int imm = (int)(to - (from + 4));
+        if ((imm & 1) != 0 || imm < -(1 << 24) || imm >= (1 << 24)) throw new ArgumentOutOfRangeException(nameof(to), "Branch out of range.");
+        int s = (imm >> 24) & 1, i1 = (imm >> 23) & 1, i2 = (imm >> 22) & 1;
+        int j1 = ~(i1 ^ s) & 1, j2 = ~(i2 ^ s) & 1;
+        ushort h1 = (ushort)(0xF000 | (s << 10) | ((imm >> 12) & 0x3FF));
+        ushort h2 = (ushort)(0x9000 | (j1 << 13) | (j2 << 11) | ((imm >> 1) & 0x7FF));
+        return [(byte)h1, (byte)(h1 >> 8), (byte)h2, (byte)(h2 >> 8)];
+    }
+
     /// <summary>
     /// Writes the CRC and re-validates the result: every changed byte must lie in an approved region,
     /// every edited JSON must equal the original with only the requested values changed, every preset
@@ -945,12 +1086,23 @@ public sealed class FirmwarePatcher
     /// </summary>
     public byte[] Build()
     {
-        byte[] result = (byte[])image.Clone();
+        byte[] result;
+        if (hookCode.Length == 0) result = (byte[])image.Clone();
+        else
+        {
+            // Stock image with its CRC slot zeroed, then the hook code, then the CRC; a multiple of 32 bytes
+            // (the update frame size). The bootloader accepts longer images (tested on hardware).
+            int length = (original.Length + hookCode.Length + 4 + 31) / 32 * 32;
+            result = new byte[length];
+            Array.Copy(image, result, image.Length - 4);
+            hookCode.CopyTo(result, original.Length);
+        }
         FenderFirmware.ValidateFirmware(result, out _, out uint crc);
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(result.Length - 4), crc);
 
-        if (result.Length != original.Length) throw new InvalidOperationException("Image size changed.");
-        for (int i = 0; i < result.Length; i++)
+        if (hookCode.Length == 0 && result.Length != original.Length) throw new InvalidOperationException("Image size changed.");
+        if (LoadAddress + (uint)result.Length > FlashEnd) throw new InvalidOperationException("Image does not fit in flash.");
+        for (int i = 0; i < original.Length; i++)
         {
             if (result[i] == original[i]) continue;
             if (!allowedRegions.Any(r => i >= r.Start && i < r.End))
@@ -980,6 +1132,15 @@ public sealed class FirmwarePatcher
             FenderPreset.Parse(check.GetJson(p));
         }
         if (check.Version.Length != VersionLength) throw new InvalidOperationException("Version string length changed.");
+        if (hookCode.Length > 0)
+        {
+            FirmwareInfo.ReadUsbRequests(result, out _, out uint? dflt);
+            int o = (int)(dflt!.Value - LoadAddress);
+            if (!result.AsSpan(o, 4).SequenceEqual(EncodeBW(dflt.Value, LoadAddress + (uint)original.Length)))
+                throw new InvalidOperationException("Hook branch does not point at the hook code.");
+            if (!result.AsSpan(original.Length, hookCode.Length).SequenceEqual(hookCode))
+                throw new InvalidOperationException("Hook code was not placed after the image.");
+        }
 
         return result;
     }

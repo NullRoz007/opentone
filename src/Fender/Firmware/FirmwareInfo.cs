@@ -58,6 +58,10 @@ public sealed class FirmwareInfo
     public UsbDescriptor? Usb { get; private init; }
     public IReadOnlyList<UsbRequest>? UsbRequests { get; private init; }
     public uint? UsbDispatcher { get; private init; }
+    /// <summary>Message fields from the firmware's protobuf schema, with their sub-message layout.</summary>
+    public IReadOnlyList<(int Field, string Layout, int Size, int? BytesMax)>? UsbSchema { get; private init; }
+    /// <summary>Fields that decode but have no dispatcher case: usable as `--hook` slots.</summary>
+    public IReadOnlyList<int> HookSlots { get; private init; } = [];
     public IReadOnlyList<CatalogueEntry> Catalogue { get; private init; } = [];
     public IReadOnlyList<string> ModelsNotInCatalogue { get; private init; } = [];
     public IReadOnlyList<ImageState> Images { get; private init; } = [];
@@ -88,8 +92,10 @@ public sealed class FirmwareInfo
             SourceFiles = FindSourceFiles(firmware),
             Layout = ReadLayout(firmware),
             Usb = ReadUsbDescriptor(firmware),
-            UsbRequests = ReadUsbRequests(firmware, out uint? dispatcher),
+            UsbRequests = ReadUsbRequests(firmware, out uint? dispatcher, out _),
             UsbDispatcher = dispatcher,
+            UsbSchema = ReadUsbSchema(firmware),
+            HookSlots = patcher.HookSlots().Keys.Order().ToList(),
             Catalogue = catalogue,
             ModelsNotInCatalogue = uncatalogued,
             Images = patcher.Images
@@ -185,9 +191,10 @@ public sealed class FirmwareInfo
     /// Decodes the request dispatcher: "subs r3, #base; cmp r3, #count-1; bhi.w default; tbh [pc, r3, lsl #1]".
     /// Field numbers whose table entry differs from the most common (default) target are handled.
     /// </summary>
-    private static List<UsbRequest>? ReadUsbRequests(byte[] d, out uint? dispatcher)
+    internal static List<UsbRequest>? ReadUsbRequests(byte[] d, out uint? dispatcher, out uint? defaultCase)
     {
         dispatcher = null;
+        defaultCase = null;
         var hits = new List<int>();
         for (int i = 0; i + 12 <= d.Length - 4; i += 2)
             if (d[i + 1] == 0x3B && d[i + 3] == 0x2B && d[i + 5] == 0xF2 && d[i + 7] == 0x80
@@ -202,10 +209,81 @@ public sealed class FirmwareInfo
         uint fallback = targets.GroupBy(t => t).OrderByDescending(g => g.Count()).First().Key;
 
         dispatcher = FirmwarePatcher.LoadAddress + (uint)at;
+        defaultCase = fallback;
         return targets.Select((t, k) => (t, field: k + baseField))
             .Where(x => x.t != fallback)
             .Select(x => new UsbRequest(x.field, Enum.IsDefined(typeof(FieldTag), x.field) ? ((FieldTag)x.field).ToString() : null, x.t))
             .ToList();
+    }
+
+    /// <summary>
+    /// The top-level nanopb 0.3 message descriptor (packed 25-byte pb_field_t records with 32-bit fields:
+    /// tag, type, data_offset, size_offset, data_size, array_size, ptr). It is found by its first two
+    /// records: field 1 a required uint8 envelope, field 2 a oneof sub-message. Null if not found.
+    /// </summary>
+    internal static List<(int Field, string Layout, int Size, int? BytesMax)>? ReadUsbSchema(byte[] d)
+    {
+        byte[] head = Convert.FromHexString("01000000" + "01" + "00000000" + "00000000" + "01000000" + "00000000");
+        byte[] second = Convert.FromHexString("02000000" + "37" + "07000000" + "fcffffff");
+        int at = -1;
+        for (int i = d.AsSpan().IndexOf(head); i >= 0; )
+        {
+            if (i + 25 + second.Length <= d.Length && d.AsSpan(i + 25, second.Length).SequenceEqual(second)) { at = i; break; }
+            int next = d.AsSpan(i + 1).IndexOf(head);
+            i = next < 0 ? -1 : i + 1 + next;
+        }
+        if (at < 0) return null;
+
+        var fields = Records(d, at);
+        if (fields == null) return null;
+        var result = new List<(int, string, int, int?)>();
+        foreach (var f in fields.Skip(1))       // field 1 is the envelope
+        {
+            if ((f.Type & 0x0f) != 7) continue;  // every command is a sub-message
+            var sub = Records(d, (int)(f.Ptr - FirmwarePatcher.LoadAddress));
+            if (sub == null) return null;
+            string layout = string.Join("; ", sub.Select(s => $"{s.Tag}: {TypeName(s)}"));
+            int? bytesMax = sub.Count == 1 && (sub[0].Type & 0x0f) == 5 ? (int)sub[0].DataSize - 4 : null;
+            result.Add((f.Tag, layout, (int)f.DataSize, bytesMax));
+        }
+        return result;
+
+        static List<(int Tag, byte Type, uint DataSize, uint ArraySize, uint Ptr)>? Records(byte[] d, int o)
+        {
+            var list = new List<(int, byte, uint, uint, uint)>();
+            for (; o >= 0 && o + 25 <= d.Length; o += 25)
+            {
+                uint tag = BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o));
+                if (tag == 0) return list;
+                if (tag > 536870911 || list.Count > 512) return null;
+                list.Add(((int)tag, d[o + 4], BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o + 13)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o + 17)), BinaryPrimitives.ReadUInt32LittleEndian(d.AsSpan(o + 21))));
+            }
+            return null;
+        }
+
+        static string TypeName((int Tag, byte Type, uint DataSize, uint ArraySize, uint Ptr) s)
+        {
+            string t = (s.Type & 0x0f) switch
+            {
+                0 => s.DataSize == 4 ? "int32" : "int8",
+                1 => s.DataSize == 4 ? "uint32" : "uint8",
+                2 => "sint32",
+                3 => "fixed32",
+                4 => "fixed64",
+                5 => $"bytes[{s.DataSize - 4}]",
+                6 => $"string[{s.DataSize}]",
+                7 => "message",
+                _ => $"type 0x{s.Type:x2}",
+            };
+            return (s.Type & 0x30) switch
+            {
+                0x10 => "optional " + t,
+                0x20 => $"repeated {t} (max {s.ArraySize})",
+                0x30 => "oneof " + t,
+                _ => t,
+            };
+        }
     }
 
     private static (List<CatalogueEntry>, string?, List<string>) ReadCatalogue(byte[] d, FirmwarePatcher patcher)

@@ -15,7 +15,7 @@ These notes come from static disassembly of `lt25-2.1.4.bin` (Thumb-2, capstone)
 | Stack top | `0x24080000` | AXI SRAM |
 | MCU | STM32H7-class, 2 MB flash, 128 KB sectors (inferred) | |
 | Free space inside the image | 52 bytes at `0x081ef0c8`–`0x081ef0fc` | Zero padding between `.data` and the CRC. The other zero runs are live data |
-| Space after the image | `0x081ef100`–`0x08200000`, about 69 KB (if the flash is 2 MB) | Whether the bootloader accepts a longer image is **untested**. The Begin frame carries no size |
+| Space after the image | `0x081ef100`–`0x08200000`, about 69 KB | **Tested:** the bootloader accepts a longer image (stock + 4 KB booted). Move the CRC to the new end and keep the size a multiple of 32 |
 
 Integrity: the app has no references to the CRC peripheral or to its own end address, so the bootloader is what checks the trailer CRC. No other checksum or signature was found in the app.
 
@@ -113,9 +113,67 @@ Avoid the data-flash marker strings unless you intend their side effect.
 
 Each image's size and position are immediates in the drawing code, and its data is packed directly against other data. In-place replacement at the same size is therefore pure data. A larger or full-screen image needs the space after the image (see "Adding code") plus a change to the constructor immediates and the data pointer.
 
-## Adding code (plan, untested)
+## Adding code: USB debug hook (tested on hardware)
 
-1. **Space:** first find out whether the bootloader accepts an image longer than stock. Flash stock plus a block of zeros with the CRC recomputed, and check that it boots. If it does, put the code after `.data` and move the CRC to the new end. If not, only the 52-byte tail is available.
-2. **Hook:** replace `ldr r0,[r4]; bl 0x80ecd6c` (6 bytes) at the default case `0x8108fdc` with a `b.w` to the new code plus a `nop`. The new code checks `[[sb]+4]` against custom field numbers (unused numbers in 3–202, or anything above 202). For any other number it re-runs the two displaced instructions and does `b.w 0x8108fe2`.
-3. **First command:** a memory peek. Read the address and length from the request, hex-encode the bytes into a std::string, then call `0x81043d4` and `0x8105c00`. That gives a read primitive for mapping everything else, using only reply formats the firmware already sends.
-4. **Toolchain:** `arm-none-eabi-gcc -mthumb -mcpu=cortex-m7`, linked at a fixed address, calling firmware functions by absolute address. Add a patch step to OpenTone that applies the hook and the blob and rewrites the CRC.
+Goal: call firmware functions over USB. Built as `fw/lt25-2.1.4-usbcall.bin` by a scratch script (keystone + capstone), not yet part of `opentone patch`.
+
+### Where the code goes
+
+The stock image ends at `0x081ef100`. The hook is appended there, the old CRC slot is zeroed, and the CRC moves to the new end (image grows by 4,096 bytes, still a multiple of 32). Nothing inside the stock image moves.
+
+- Flash: the image already reaches bank 2, so the part has 2 MB and `0x081ef100`–`0x08200000` exists.
+- MPU: `main` (`0x80fb34c`) configures only the D2/D3 SRAM regions (`0x30000000`, `0x30020000`, `0x30040000`, `0x38000000`) and enables it with `PRIVDEFENA` (`MPU_CTRL = 5`), so flash keeps the default executable mapping.
+- **Tested on hardware:** the bootloader accepts an image longer than stock. `fw/lt25-2.1.4-grow-test.bin` (stock + 4,096 bytes of padding, CRC at the new end) flashed and booted normally.
+
+### Carrier message
+
+Field 12 is `{1: bytes[500]}` in the schema (see the USB protocol document) but has no case in the dispatcher, so it decodes normally and lands in the default case. Its `bytes` type carries binary arguments and replies of up to 500 bytes.
+
+**Tested on hardware with stock 2.1.4:** a field 12 request gets the default case's field 200 `{1: 0}` reply, and the amp keeps working. So the request decodes and reaches the default case.
+
+### Hook
+
+`0x8108fdc` (default case, `ldr r0,[r4]; bl 0x80ecd6c`) becomes `b.w 0x081ef100; nop`. The hook runs the same session check. If the request is field 12 it calls the handler, then jumps to the dispatcher exit `0x8108174`. Otherwise it resumes the default case at `0x8108fe8`. `r4` (`MessageCommManager*`) and `sb` (`Message**`) are callee-saved and set in the prologue, so they are valid on every path into the default case.
+
+The handler builds its reply like the firmware's own builders (for example `0x8104564`): operator new `0x8146efc` (0xfb0 bytes), memset `0x81745c0`, envelope 2, `which` 12. Then it sends it with `0x8105c00(this, &unique_ptr)` and frees it with `0x8145da0` if still owned. 272 bytes in all.
+
+| Request bytes | Op | Reply payload |
+|---|---|---|
+| `01 00 00 00` addr(u32) len(u16) | PEEK, len ≤ 496 | the bytes |
+| `02 00 00 00` addr(u32) len(u16) `00 00` data | POKE | none |
+| `03 00 00 00` fn(u32) r0 r1 r2 r3 (u32 each) | CALL, Thumb bit added | r0, r1 |
+
+The reply is `[op][status][0][0][payload]`. Status: 0 ok, 1 bad length, 2 unknown op. Copies use word accesses when the address and length are both 4-aligned, byte accesses otherwise.
+
+OpenTone side: `get mem <addr> [len]`, `set mem <addr> <hex>` and `call <fn> [r0..r3]` (also in the live session). Requests are single 64-byte frames, so a POKE carries at most 41 bytes and OpenTone splits larger writes. On stock firmware these commands report that the hook is missing.
+
+Caveats:
+- There is no address check. Reading or calling an invalid address faults, and the amp hangs until a power cycle.
+- CALL runs on the USB message task's stack. Functions that block, or that expect to run on another task, may misbehave.
+
+Toolchain note: Keystone 0.9.2 mis-encodes conditional wide branches (`beq.w`/`bne.w`) to absolute addresses. The hook routes them through local `b.w` stubs, and the build script disassembles the blob and checks every branch target.
+
+### Next steps
+
+1. ~~Flash `lt25-2.1.4-grow-test.bin`.~~ Done: longer images are accepted.
+2. ~~Flash `lt25-2.1.4-usbcall.bin` and run `opentone get mem 0x08020200 16`.~~ Done: it printed the vector table.
+3. ~~Try a harmless CALL~~ Done: `opentone call 0x80ecd6c 0x0801ee26`. That getter returns the byte at `r0 + 0x13dd`, which here is `0x08020203`, the top byte of the initial SP, so r0 should be `0x24`.
+4. ~~Move the build into `opentone patch`.~~ Done as `--hook FIELD=FILE` (below).
+
+### Hooks in `opentone patch`
+
+`--hook 12=hooks/debug.c` replaces the scratch build. The debug hook is now C (`hooks/debug.c`) with the same wire format. The pipeline:
+
+1. `FirmwarePatcher.HookSlots()` reads the nanopb schema (`FirmwareInfo.ReadUsbSchema`) and the dispatcher's jump table. A slot is a field that decodes but has no case, excluding 200 (the status reply). On 2.1.4 there are 28: 2, 7, 9, 12 (`bytes[500]`), 14, 31, 32, 35, 36, 37, 38, 40, 42, 44, 46, 47, 50, 52, 56, 59, 61, 63, 100, 103, 107, 109, 111 and 203.
+2. `FirmwarePatcher.HookTarget()` finds every address from code, not from constants:
+   - the default case (the most common jump-table target);
+   - from the default case's own instructions (`ldr r0,[r4]; bl gate; cmp r0,#0; beq.w exit`): the session check, the exit and the resume point (+12);
+   - from the default case body: the status-reply builder, `send` and the sized delete. The delete is checked by its `mov.w r1,#0xfb0`;
+   - operator new: the first call in the status-reply builder, after `mov.w r0,#0xfb0`.
+3. `PatchCommand.CompileHooks` runs `arm-none-eabi-gcc` (Cortex-M7, hard float, `-Os`, freestanding):
+   - inputs: `runtime/entry.S`, `runtime/runtime.c`, each hook with `OT_HOOK_FIELD`, `OT_HOOK_NAME` and the slot's sizes, and a generated field-to-hook table;
+   - link: `runtime/hooks.ld` at `OT_BASE`, with the firmware symbols passed as `--defsym`. The linker script asserts that the entry point comes first and that there is no `.data` or `.bss`;
+   - output: `objcopy` takes `.text` as the blob.
+4. `InstallHooks` writes `b.w OT_BASE; nop` over the default case's first 6 bytes. `Build()` then lays out the result: the stock bytes with the CRC slot zeroed, the blob, padding to a multiple of 32, and the new CRC. It re-checks that the branch points at the blob.
+
+The entry stub walks the `{field, hook}` table. On a match it calls `hook(MessageCommManager*, Message*)` and exits the dispatcher. Otherwise it resumes the stock default case, so unknown fields still get the "unsupported" reply.

@@ -16,20 +16,14 @@ public class ConnectSettings : CommandSettings, IDeviceSettings
         {
             RunAsync(amp, s).GetAwaiter().GetResult();
         }
-        public async Task<int> RunAsync(FenderAmp amp, ConnectSettings s)
+        // AmpCommand has already done the hello/sync handshake.
+        public async Task RunAsync(FenderAmp amp, ConnectSettings s)
         {
-            string? hello = amp.Hello();
-            if (hello != null)
-            {
-                amp.StartHeartbeat();
-                var _ = new WebSocketServer(amp).Run(8080);
-                amp.Sync();
-                await new TuiSession(amp).Run();
-                
-                AnsiConsole.Cursor.Show();
-                AnsiConsole.Clear();
-            }
-            
-            return 0;
+            amp.StartHeartbeat();
+            var _ = new WebSocketServer(amp).Run(8080);
+            await new TuiSession(amp).Run();
+
+            AnsiConsole.Cursor.Show();
+            AnsiConsole.Clear();
         }
     }

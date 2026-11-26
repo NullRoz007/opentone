@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net.Security;
 using System.Text.Json.Nodes;
+using Google.Protobuf;
 using LibUsbDotNet;
 using LibUsbDotNet.LibUsb;
 
@@ -188,6 +189,96 @@ namespace OpenTone
 
                 return reply == null ? null : FenderProtocol.ParseModelChange(reply);
             });
+        }
+
+        // ---- Debug hook (field 12), only answered by a firmware built with the OpenTone hook ----
+        // Request bytes: [op][0][0][0][u32 address][args...]. Reply bytes: [op][status][0][0][payload].
+
+        public const byte DebugPeek = 1, DebugPoke = 2, DebugCall = 3;
+        public const int DebugMaxPeek = 496;    // 500-byte reply minus the 4-byte header
+        public const int DebugMaxPoke = 41;     // a request must fit in one 61-byte OUT frame
+
+        /// <summary>
+        /// Sends one debug request and returns the reply payload (after the 4-byte header). Throws if the
+        /// firmware has no hook (stock answers with the "unsupported" status message) or reports an error.
+        /// </summary>
+        public byte[] DebugRequest(byte op, uint address, byte[] args)
+        {
+            var value = new byte[8 + args.Length];
+            value[0] = op;
+            BitConverter.TryWriteBytes(value.AsSpan(4), address);
+            args.CopyTo(value, 8);
+
+            // Sub-message {1: bytes}: tag 0x0a, length, value.
+            byte[] inner = [0x0a, (byte)value.Length, .. value];
+            if (inner.Length > 57) throw new ArgumentException("Debug request too long for one frame", nameof(args));
+
+            return transport.ExecuteTransaction(() =>
+            {
+                transport.Write(FenderProtocol.Request(FieldTag.Debug, inner));
+                for (int i = 0; i < transport.MaxReadAttempts; i++)
+                {
+                    var input = new CodedInputStream(transport.ReadMessage());
+                    uint tag;
+                    while ((tag = input.ReadTag()) != 0)
+                    {
+                        int field = WireFormat.GetTagFieldNumber(tag);
+                        if (field == (int)FieldTag.Status)
+                            throw new InvalidOperationException(
+                                "The amp answered \"unsupported message\": this firmware has no debug hook. Flash an image built with it first.");
+                        if (field != (int)FieldTag.Debug || WireFormat.GetTagWireType(tag) != WireFormat.WireType.LengthDelimited)
+                        {
+                            input.SkipLastField();
+                            continue;
+                        }
+
+                        var sub = new CodedInputStream(input.ReadBytes().ToByteArray());
+                        byte[] reply = sub.ReadTag() == 0x0a ? sub.ReadBytes().ToByteArray() : [];
+                        if (reply.Length < 4 || reply[0] != op) continue;
+                        if (reply[1] != 0)
+                            throw new InvalidOperationException(reply[1] switch
+                            {
+                                1 => "The hook rejected the request length.",
+                                2 => "The hook does not know this operation.",
+                                _ => $"The hook returned status {reply[1]}.",
+                            });
+                        return reply[4..];
+                    }
+                }
+                throw new TimeoutException("No reply to the debug request.");
+            });
+        }
+
+        /// <summary>Reads <paramref name="length"/> bytes at <paramref name="address"/>. Word accesses when both are 4-aligned.</summary>
+        public byte[] Peek(uint address, int length)
+        {
+            var result = new List<byte>(length);
+            while (result.Count < length)
+            {
+                int n = Math.Min(DebugMaxPeek, length - result.Count);
+                result.AddRange(DebugRequest(DebugPeek, address + (uint)result.Count, BitConverter.GetBytes((ushort)n).Concat(new byte[2]).ToArray()));
+            }
+            return result.ToArray();
+        }
+
+        /// <summary>Writes <paramref name="data"/> at <paramref name="address"/>, in chunks that fit one frame.</summary>
+        public void Poke(uint address, byte[] data)
+        {
+            for (int done = 0; done < data.Length; done += DebugMaxPoke)
+            {
+                var chunk = data.AsSpan(done, Math.Min(DebugMaxPoke, data.Length - done));
+                DebugRequest(DebugPoke, address + (uint)done, [.. BitConverter.GetBytes((ushort)chunk.Length), 0, 0, .. chunk]);
+            }
+        }
+
+        /// <summary>Calls the firmware function at <paramref name="function"/> with up to 4 arguments. Returns r0 and r1.</summary>
+        public (uint R0, uint R1) Call(uint function, params uint[] args)
+        {
+            if (args.Length > 4) throw new ArgumentException("At most 4 arguments (r0-r3)", nameof(args));
+            var regs = new byte[16];
+            for (int i = 0; i < args.Length; i++) BitConverter.TryWriteBytes(regs.AsSpan(4 * i), args[i]);
+            byte[] reply = DebugRequest(DebugCall, function, regs);
+            return (BitConverter.ToUInt32(reply, 0), BitConverter.ToUInt32(reply, 4));
         }
 
         JsonNode? ReadPresetJson(FieldTag replyTag)

@@ -16,6 +16,8 @@ public sealed class TuiCommandRegistry
                     return Task.FromResult(AmpActions.GetPreset(amp, int.Parse(a[1])));
                 case "node":
                     return Task.FromResult(AmpActions.ViewNode(amp, a[1]));
+                case "mem":
+                    return Task.FromResult(AmpActions.Peek(amp, a[1], a.Length > 2 ? a[2] : "16"));
                 default:
                     throw new Exception("Unknown type: "+a[0]);
             }
@@ -30,16 +32,18 @@ public sealed class TuiCommandRegistry
                     return Task.FromResult(AmpActions.SetPreset(amp, int.Parse(a[1])));
                 case "model":
                     return Task.FromResult(AmpActions.SetModel(amp, a[1], a[2]));
+                case "mem":
+                    return Task.FromResult(AmpActions.Poke(amp, a[1], string.Concat(a[2..])));
                 default:
                     throw new Exception("Unknown type: "+a[0]);
             }
         },
+        ["call"] = (amp, a) => Task.FromResult(AmpActions.Call(amp, a[0], a[1..])),
         ["listen"] = async (amp, a) =>
         {
-            AudioCapture c = new(
-                a[0],
-                a[1] ?? ""
-            );
+            if (a.Length < 1) return "usage: listen <playbackid> [captureid]";
+            object captureId = a.Length > 1 ? a[1] : ListenCommand.FindCaptureDevice(amp);
+            using AudioCapture c = new(captureId, a[0]);
 
             return await AudioActions.Listen(c);
         }

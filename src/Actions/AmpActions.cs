@@ -70,4 +70,43 @@ static class AmpActions
         result = amp.SetModel(nodeId, fenderId);
         return ViewNode(amp, nodeId);
     }
+
+    // ---- Debug hook (needs a firmware built with it) ----
+
+    /// <summary>Parses "0x..." as hex, anything else as decimal.</summary>
+    public static uint ParseU32(string text) =>
+        text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? Convert.ToUInt32(text[2..], 16)
+            : uint.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Hex dump of <paramref name="length"/> bytes at <paramref name="address"/>, 16 per line.</summary>
+    public static string Peek(FenderAmp amp, string address, string length)
+    {
+        uint start = ParseU32(address);
+        byte[] data = amp.Peek(start, (int)ParseU32(length));
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < data.Length; i += 16)
+        {
+            var line = data.AsSpan(i, Math.Min(16, data.Length - i));
+            string hex = string.Join(' ', line.ToArray().Select(b => b.ToString("x2")));
+            string ascii = new(line.ToArray().Select(b => b is >= 0x20 and < 0x7f ? (char)b : '.').ToArray());
+            sb.AppendLine($"{start + (uint)i:x8}  {hex,-47}  {ascii}");
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>Writes hex bytes (e.g. "deadbeef" or "de ad be ef") at the address.</summary>
+    public static string Poke(FenderAmp amp, string address, string hex)
+    {
+        byte[] data = Convert.FromHexString(hex.Replace(" ", "").Replace("0x", ""));
+        amp.Poke(ParseU32(address), data);
+        return $"wrote {data.Length} bytes at 0x{ParseU32(address):x8}";
+    }
+
+    /// <summary>Calls a firmware function (Thumb bit added automatically) with up to 4 arguments.</summary>
+    public static string Call(FenderAmp amp, string function, IEnumerable<string> args)
+    {
+        var (r0, r1) = amp.Call(ParseU32(function), args.Select(ParseU32).ToArray());
+        return $"r0 = 0x{r0:x8} ({r0})\nr1 = 0x{r1:x8} ({r1})";
+    }
 }

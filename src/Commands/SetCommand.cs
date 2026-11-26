@@ -6,15 +6,15 @@ using Spectre.Console.Cli;
 public class SetSettings : CommandSettings, IDeviceSettings
 {
     [CommandArgument(0, "<type>")]
-    [Description("What to set: param, preset, model")]
+    [Description("What to set: param, preset, model, mem (needs the debug hook firmware)")]
     public required string Type { get; init; }
 
     [CommandArgument(1, "<arg1>")]
-    [Description("Node ID or preset slot")]
+    [Description("Node ID, preset slot or memory address")]
     public required string Arg1 { get; init; }
 
     [CommandArgument(2, "[arg2]")]
-    [Description("Parameter ID or model ID")]
+    [Description("Parameter ID, model ID or hex bytes")]
     public string? Arg2 { get; init; }
 
     [CommandArgument(3, "[arg3]")]
@@ -35,6 +35,7 @@ public class SetCommand : AmpCommand<SetSettings>
             "param" => AmpActions.SetParamAuto(amp, s.Arg1, s.Arg2 ?? "", s.Arg3 ?? ""),
             "preset" => AmpActions.SetPreset(amp, int.Parse(s.Arg1)),
             "model" => AmpActions.SetModel(amp, s.Arg1, s.Arg2 ?? ""),
+            "mem" => AmpActions.Poke(amp, s.Arg1, s.Arg2 ?? throw new ArgumentException("set mem <address> <hex bytes>")),
             _ => throw new ArgumentException("Unknown type: " + s.Type)
         };
 
@@ -43,6 +44,7 @@ public class SetCommand : AmpCommand<SetSettings>
             "param" => $"Node {s.Arg1} after setting {s.Arg2}",
             "preset" => $"Preset {s.Arg1} selected",
             "model" => $"Node {s.Arg1} after setting model",
+            "mem" => $"Memory at {s.Arg1}",
             _ => "Result",
         };
         Ui.Result(title, result);

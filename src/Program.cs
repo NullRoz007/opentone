@@ -12,6 +12,7 @@ app.Configure(config =>
     config.AddCommand<ListCommand>("list").WithDescription("List available devices");
     config.AddCommand<ConnectCommand>("connect").WithDescription("Connect to a device");
     config.AddCommand<ListenCommand>("listen").WithDescription("Listen to a device over usb");
+    config.AddCommand<CallCommand>("call").WithDescription("Call a firmware function (needs the debug hook firmware)");
     config.AddCommand<FirmwareCommand>("firmware").WithDescription("Show the firmware version");
     config.AddCommand<DumpCommand>("dump").WithDescription("Dump the firmware from a PcapNG capture");
     config.AddCommand<PatchCommand>("patch").WithDescription("Inspect or patch a firmware image (presets, images, version, boot patches)");

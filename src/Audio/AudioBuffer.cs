@@ -3,7 +3,7 @@ namespace OpenTone;
 public class AudioBuffer
 {
     private const int Channels = 2;
-    private const int AudioBufferCapacity = 128;
+    private const int AudioBufferCapacity = 8192;
     private const int AudioBufferMask = AudioBufferCapacity - 1;
 
     private readonly short[] audioBuffer = new short[AudioBufferCapacity];

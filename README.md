@@ -37,10 +37,11 @@ Commands that talk to the amp take `-d, --device <device>`. Run `opentone list` 
 |---|---|
 | `list` | List attached Fender devices and their mode |
 | `connect` | Open a live session (see below) |
-| `listen <captureid> <playbackid>` | Listen to audio from the amp using the specified capture and playback devices |
+| `listen <playbackid> [captureid]` | Play the amp's USB audio through a playback device. IDs come from `opentone list`. Without a capture ID, the amp given with `-d` is found by its USB VID, PID and serial (Windows/WASAPI only for now) |
 | `firmware` | Show the firmware version |
 | `get <type> <arg1> [arg2]` | Read `param <node> <param>`, `preset <slot>` or `node <node>`. Presets and nodes print as plain JSON |
 | `set <type> <arg1> [arg2] [arg3]` | Set `param <node> <param> <value>`, `preset <slot>` or `model <node> <model>` |
+| `call <fn> [r0..r3]` | Call a firmware function. Needs a firmware with the debug hook (see the firmware map); `get mem <addr> [len]` and `set mem <addr> <hex>` read and write memory the same way |
 | `dump <capture> <output>` | Extract the firmware from a capture of an official update. No amp needed |
 | `patch <input> [output] [options]` | Inspect a firmware image or write a patched copy (see below). No amp needed except for `--pull` |
 | `flash <path>` | Flash a firmware file (update mode only). `--yes` skips the prompt |
@@ -52,7 +53,7 @@ opentone list
 opentone get preset 1 -d mustang-lt25 > preset1.json
 opentone get param amp gain -d mustang-lt25
 opentone set preset 3 -d mustang-lt25
-opentone listen <captureid> <playbackid> -d mustang-lt25
+opentone listen <playbackid> -d mustang-lt25
 ```
 
 ### Live session
@@ -96,6 +97,7 @@ This checks the CRC and saves the image.
 | `--fw-version X.Y.Z` | Change the version string (exactly 5 characters) |
 | `--force-restore` | Boot patch: restore all presets from the factory set on every boot |
 | `--reformat-flash` | Boot patch: erase the amp's preset and settings memory on the next boot |
+| `--hook FIELD=FILE` | Compile a C hook and install it on a USB message field the firmware doesn't handle (see below). Repeatable |
 | `--dry-run` | Validate without writing |
 
 ```
@@ -105,25 +107,57 @@ opentone patch lt25-2.1.4.bin custom.bin --rename "2=MY|LEAD" --set 2:amp.gain=0
 
 The firmware holds factory presets only for slots 1-30; slots 31-60 all come from the one `empty` template. Each slot has a fixed amount of space, so a preset that would grow past it is refused.
 
+### Hooks: your own code in the firmware
+
+`--hook FIELD=FILE` compiles a C file and installs it as the handler for a USB message field. The field must be one the firmware decodes but doesn't handle; `patch --info` lists them under "Hook slots". All hooks are linked into one block placed after the stock image, and the dispatcher's "unsupported message" case branches to it. The firmware addresses the code needs are found in the image itself, so an unrecognised build is refused rather than mis-patched.
+
+Needs the Arm GNU toolchain (`arm-none-eabi-gcc`) on PATH, for example `scoop bucket add extras` then `scoop install gcc-arm-none-eabi`.
+
+```
+opentone patch lt25-2.1.4.bin debug.bin --hook 12=hooks/debug.c
+opentone flash debug.bin -d lt-dfu
+opentone get mem 0x08020200 16 -d mustang-lt25          # read memory
+opentone call 0x80ecd6c 0x0801ee26 -d mustang-lt25     # call a firmware function
+```
+
+| File | Purpose |
+|---|---|
+| `hooks/opentone.h` | Hook API: the message layout, `OT_HOOK(mgr, request)`, `ot_reply_new` and `ot_send`, and the rules hooks must follow |
+| `hooks/debug.c` | PEEK, POKE and CALL over field 12. Used by `get mem`, `set mem` and `call` |
+| `hooks/runtime/` | The entry stub, shared helpers and linker script |
+
+Hooks can't use writable globals, because nothing initialises RAM for them, and the link fails if they do. They run on the amp's USB message task, so keep them short. Reading, writing or calling a bad address hangs the amp until you power-cycle it.
+
 ### Building a custom firmware
 
 `Build-OpenTone-Firmware.ps1` (Windows) and `build-opentone-firmware.sh` (Linux, bash 4+) build an image in one step:
 
-- Every preset in `presets/custom/` is imported into the slot named by its file name: `05 SPACE ECHO.json` goes to slot 5, and a file starting with `empty` sets the template for slots 31-60.
-- The splash logo is replaced with `assets/logo.bmp`, which must be 128x43.
+- Every preset in `presets/lt25/` is imported into the slot named by its file name: `05 DREAMY.json` goes to slot 5.
+  - Slots 31-60 share one template in the firmware, so files for those slots must be identical, and one of them sets the template.
+  - A file starting with `empty` sets the template directly.
+- The splash logo is replaced with `assets/splash-red.bmp`, which must be 128x43. The other `assets/splash-*.bmp` files are alternatives.
+- The debug hook (`hooks/debug.c`) is installed on field 12, which needs `arm-none-eabi-gcc` (see [Hooks](#hooks-your-own-code-in-the-firmware)). `-NoHooks` / `--no-hooks` leaves it out, and `-Hook` / `--hook FIELD=FILE` installs other hooks instead.
 - Everything is applied in one `patch` run, so the build either passes every check or writes nothing.
 
 ```
-./Build-OpenTone-Firmware.ps1            # PowerShell
-./build-opentone-firmware.sh             # bash
+./Build-OpenTone-Firmware.ps1                                   # PowerShell
+./build-opentone-firmware.sh                                    # bash
+./Build-OpenTone-Firmware.ps1 -Presets ./presets/custom -NoHooks
 ```
 
-The output goes to `firmware/lt25-2.1.4-opentone.bin`. Both scripts take options for the base firmware, output, preset folder and splash, plus a dry run (`-DryRun` / `--dry-run`).
+The output goes to `fw/lt25-2.1.4-opentone.bin`. Both scripts also take the base firmware, output, preset folder and splash as options, plus a dry run (`-DryRun` / `--dry-run`).
 
-`presets/custom/` contains 30 presets built from the firmware's own factory presets, so each one uses only models and parameters the firmware ships. `presets/custom/make_custom_presets.py` generates them from the design list in the script and fits each into a slot with enough space:
+There are two preset folders:
+
+| Folder | Contents |
+|---|---|
+| `presets/lt25/` | The factory presets as read from an LT25, slots 01-30 |
+| `presets/custom/` | 30 presets built from the firmware's own factory presets, so each one uses only models and parameters the firmware ships |
+
+`presets/custom/make_custom_presets.py` generates the custom set from the design list in the script and fits each preset into a slot with enough space:
 
 ```
-python presets/custom/make_custom_presets.py firmware/lt25-2.1.4.bin presets/custom
+python presets/custom/make_custom_presets.py fw/lt25-2.1.4.bin presets/custom
 ```
 
 ### Flashing firmware
