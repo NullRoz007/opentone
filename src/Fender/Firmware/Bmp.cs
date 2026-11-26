@@ -6,7 +6,7 @@ namespace OpenTone;
 /// Minimal BMP reader/writer (uncompressed 24- and 32-bit) for exporting and importing firmware images
 /// without an imaging dependency. Pixels are 0xRRGGBB, row-major, top row first.
 /// </summary>
-public static class FenderBmp
+public static class Bmp
 {
     public static (int Width, int Height, int[] Pixels) Read(string path)
     {

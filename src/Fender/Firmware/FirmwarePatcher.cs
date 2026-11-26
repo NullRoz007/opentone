@@ -349,7 +349,7 @@ public sealed class FirmwarePatcher
     {
         var px = new int[img.Width * img.Height];
         for (int i = 0; i < px.Length; i++)
-            px[i] = FenderBmp.FromRgb565(BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(img.Offset + i * 2)));
+            px[i] = Bmp.FromRgb565(BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(img.Offset + i * 2)));
         return px;
     }
 
@@ -364,7 +364,7 @@ public sealed class FirmwarePatcher
         if (pixels.Length != width * height) throw new ArgumentException($"{source}: pixel count does not match its size.");
 
         for (int i = 0; i < pixels.Length; i++)
-            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(img.Offset + i * 2), FenderBmp.ToRgb565(pixels[i]));
+            BinaryPrimitives.WriteUInt16LittleEndian(image.AsSpan(img.Offset + i * 2), Bmp.ToRgb565(pixels[i]));
         allowedRegions.Add((img.Offset, img.Offset + img.ByteLength, $"image {img.Name}"));
         Changes.Add($"image {img.Name}: replaced with {source} ({width}x{height})");
     }
