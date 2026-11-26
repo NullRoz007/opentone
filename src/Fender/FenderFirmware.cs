@@ -7,9 +7,7 @@ using System.Runtime.InteropServices;
 using OpenTone.Capture;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Spectre.Console;
-using System.Text.Encodings.Web;
 
 
 namespace OpenTone
@@ -377,21 +375,11 @@ namespace OpenTone
         }
 
         // instance members
-        public uint CheckSumCalculated;
-        public uint CheckSumExpected;
-        public int Size;
         public byte[] Payload;
+        public FirmwareInfo Info;
         public FenderFirmware(byte[] payload)
         {   
-            uint crcCalculated = 0;
-            uint crcExpected = 0;
-
-            var valid = ValidateFirmware(payload, out crcExpected, out crcCalculated);
-            if(!valid) throw new Exception($"Invalid firmware. Calculated CRC ({crcCalculated}) != Expected CRC ({crcExpected})");
-
-            CheckSumCalculated = crcCalculated;
-            CheckSumExpected = crcExpected;
-            Size = payload.Length;
+            Info = FirmwareInfo.Read(payload);
             Payload = payload;
         }
 
@@ -452,7 +440,7 @@ namespace OpenTone
             if (newBytes.Length > oldBytes.Length)
                 throw new ArgumentException("New string must not be longer than the old one");
 
-            var firmware = Payload.AsSpan(0, Size - 4);
+            var firmware = Payload.AsSpan(0, Info.Size - 4);
             int index = firmware.IndexOf(oldBytes);
             if(index == -1 || index != firmware.LastIndexOf(oldBytes)) throw new Exception("Target string must occur exactly once");
 

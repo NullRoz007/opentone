@@ -14,7 +14,7 @@ public class FirmwareSettings : CommandSettings, IDeviceSettings
 public class FirmwareCommand : AmpCommand<FirmwareSettings>
 {
     protected override void Run(FenderAmp amp, FirmwareSettings s) =>
-        AnsiConsole.Write(Ui.KeyValues("Amp")
+        AnsiConsole.Write(Ui.KeyValues()
             .Row("Device", $"[bold]{Markup.Escape(amp.GetDeviceName() ?? "Unknown device")}[/]")
             .Row("Firmware version", $"[bold]{Markup.Escape(AmpActions.GetFirmware(amp))}[/]"));
 }
@@ -87,7 +87,6 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
         byte[] raw = File.ReadAllBytes(settings.Path);
         var usbDevice = amp.GetUsbDevice();
         FirmwareTransport fwTransport = new(usbDevice);
-
         FenderFirmware firmware = new(raw); //throws when firmware is invalid
 
         var warning = new Panel(
@@ -125,7 +124,6 @@ public class UpdateCommand : AmpCommand<FirmwareUpdateSettings>
                 flash.Value = 100;
                 flash.Description = "[green]Complete[/]";
             });
-            Ui.Message("Flash complete", "The amp will restart with the new firmware.", Ui.Level.Success);
         }
     }
 }
@@ -141,10 +139,10 @@ public class DumpCommand : Command<FirmwareDumpSettings>
         var firmware = CreateFromCapture(settings.Input);   // throws if the CRC is invalid
         firmware.Save(settings.Output);
 
-        AnsiConsole.Write(Ui.KeyValues("Dump")
+        AnsiConsole.Write(Ui.KeyValues()
             .Row("Capture", $"[bold]{Markup.Escape(settings.Input)}[/]")
-            .Row("Size", $"{firmware.Size} bytes ({firmware.Size / 32} update frames)")
-            .Row("CRC-32", $"0x{firmware.CheckSumCalculated:X8} [green]valid[/] [grey](expected 0x{firmware.CheckSumExpected:X8})[/]")
+            .Row("Size", $"{firmware.Info.Size} bytes ({firmware.Info.Size / 32} update frames)")
+            .Row("CRC-32", $"0x{firmware.Info.CrcCalculated:X8} [green]valid[/] [grey](expected 0x{firmware.Info.CrcExpected:X8})[/]")
             .Row("Written to", $"[bold]{Markup.Escape(settings.Output)}[/]"));
         return 0;
     }

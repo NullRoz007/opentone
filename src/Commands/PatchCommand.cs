@@ -83,6 +83,7 @@ public class PatchCommand : Command<PatchSettings>
     public override int Execute(CommandContext context, PatchSettings settings, CancellationToken cancellation)
     {
         var firmware = Load(settings.Input);
+        Ui.Section("Firmware");
         Ui.FirmwareSummary(settings.Input, firmware);
 
         var patcher = new FirmwarePatcher(firmware.Payload);
@@ -137,7 +138,7 @@ public class PatchCommand : Command<PatchSettings>
             {
                 var (name, file) = Split(spec, '=', "--export-image", "NAME=FILE");
                 var img = patcher.GetImage(name);
-                Bmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
+                FenderBmp.Write(file, img.Width, img.Height, patcher.ReadImage(img));
                 exported.AddRow(Markup.Escape(img.Name), $"{img.Width}x{img.Height}", $"[bold]{Markup.Escape(file)}[/]");
             }
             AnsiConsole.Write(exported);
@@ -146,7 +147,7 @@ public class PatchCommand : Command<PatchSettings>
         foreach (var spec in settings.Image)
         {
             var (name, file) = Split(spec, '=', "--image", "NAME=FILE");
-            var (w, h, px) = Bmp.Read(file);
+            var (w, h, px) = FenderBmp.Read(file);
             patcher.WriteImage(patcher.GetImage(name), w, h, px, Path.GetFileName(file));
         }
 
@@ -179,7 +180,7 @@ public class PatchCommand : Command<PatchSettings>
             throw new ArgumentException("Refusing to overwrite the input file. Choose a different output path.");
 
         File.WriteAllBytes(settings.Output, result);
-        AnsiConsole.Write(Ui.KeyValues("Output")
+        AnsiConsole.Write(Ui.KeyValues()
             .Row("Written to", $"[bold]{Markup.Escape(settings.Output)}[/]")
             .Row("Size", $"{result.Length} bytes")
             .Row("CRC-32", $"0x{crc:X8} [green]valid[/]"));
@@ -312,7 +313,7 @@ public class PatchCommand : Command<PatchSettings>
 
         Ui.Section("Factory presets");
         Ui.Messages("Warnings", p.Problems, Ui.Level.Warning);
-        AnsiConsole.Write(PresetTable(p, null));
+        AnsiConsole.Write(PresetTable(p));
 
         Ui.Section("Models");
         var models = Ui.Table($"{p.Models.Count} defined", "Menu", "Name on amp", "Model", "Params", "Defined");
@@ -322,14 +323,13 @@ public class PatchCommand : Command<PatchSettings>
             models.AddRow(Markup.Escape(e.CategoryMenuName), Markup.Escape(e.MenuName), Markup.Escape(e.FenderId.Replace("DUBS_", "")),
                 e.Defined ? parameters.ToString() : "", e.Defined ? "[green]yes[/]" : "[red]no[/]");
         }
-        if (info.ModelsNotInCatalogue.Count > 0)
-            models.Caption($"Defined but not in any menu: {Markup.Escape(string.Join(", ", info.ModelsNotInCatalogue.Select(m => m.Replace("DUBS_", ""))))}");
+     
         AnsiConsole.Write(models);
 
         Ui.Section("Images");
         if (info.Images.Count > 0)
         {
-            var images = Ui.Table(null, "Image", "Size", "Address", "State", "Description");
+            var images = Ui.Table("Image", "Size", "Address", "State", "Description");
             foreach (var img in info.Images)
                 images.AddRow(Markup.Escape(img.Image.Name), $"{img.Image.Width}x{img.Image.Height}", Hex(FirmwarePatcher.LoadAddress + (uint)img.Image.Offset),
                     img.Factory ? "[green]factory[/]" : "[yellow]modified[/]", $"[grey]{Markup.Escape(img.Image.Description)}[/]");
@@ -345,15 +345,15 @@ public class PatchCommand : Command<PatchSettings>
 
         // Group by top two folders; files directly under a top folder (e.g. Src/adc.c) share one group.
         static string Folder(string f) { var parts = f.Split('/'); return string.Join('/', parts.Take(Math.Min(2, parts.Length - 1))); }
-        var sources = Ui.Table(null, "Folder", "Files", "Names");
+        var sources = Ui.Table("Folder", "Files", "Names");
         foreach (var group in info.SourceFiles.GroupBy(Folder).OrderBy(x => x.Key, StringComparer.Ordinal))
             sources.AddRow(Markup.Escape(group.Key + "/"), group.Count().ToString(), $"[grey]{Markup.Escape(string.Join(", ", group.Select(f => Path.GetFileName(f))))}[/]");
         AnsiConsole.Write(sources);
     }
 
-    private static Table PresetTable(FirmwarePatcher patcher, string? title)
+    private static Table PresetTable(FirmwarePatcher patcher)
     {
-        var table = Ui.Table(title, "Slot", "Name", "Amp", "Bytes", "Spare");
+        var table = Ui.Table("Slot", "Name", "Amp", "Bytes", "Spare");
         foreach (var p in patcher.Presets.Append(patcher.EmptyPreset))
         {
             var preset = FenderPreset.Parse(patcher.GetJson(p));
@@ -366,11 +366,11 @@ public class PatchCommand : Command<PatchSettings>
 
     private static void PrintList(FirmwarePatcher patcher)
     {
-        AnsiConsole.Write(Ui.KeyValues("Image contents")
+        AnsiConsole.Write(Ui.KeyValues()
             .Row("Version", $"[bold]{Markup.Escape(patcher.Version)}[/]")
             .Row("Models", Markup.Escape(string.Join(", ", patcher.Models.Keys.Select(k => k.Replace("DUBS_", "")).Order())))
             .Row("Images", Markup.Escape(string.Join(", ", patcher.Images.Select(i => $"{i.Name} ({i.Width}x{i.Height})")))));
-        AnsiConsole.Write(PresetTable(patcher, "Factory presets"));
+        AnsiConsole.Write(PresetTable(patcher));
     }
 
     private static void PrintShow(FirmwarePatcher patcher, string target)

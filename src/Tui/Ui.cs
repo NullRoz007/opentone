@@ -20,24 +20,25 @@ public static class Ui
     };
 
     /// <summary>A data table with a header row.</summary>
-    public static Table Table(string? title, params string[] columns)
+    public static Table Table(params string[] columns)
     {
         var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
-        if (title != null) table.Title($"[bold]{Markup.Escape(title)}[/]");
         foreach (var c in columns) table.AddColumn(new TableColumn($"[bold]{Markup.Escape(c)}[/]"));
         return table;
     }
 
     /// <summary>A two-column key/value table without a header row. Keys are plain text, values are markup.</summary>
-    public static Table KeyValues(string? title = null)
+    public static Table KeyValues()
     {
         var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).HideHeaders()
             .AddColumn(new TableColumn("").NoWrap())
             .AddColumn(new TableColumn(""));
-        if (title != null) table.Title($"[bold]{Markup.Escape(title)}[/]");
+/*
+        if (title != null)
+            table.Title($"[bold]{Markup.Escape(title)}[/]", new Style(justify: Justify.Left));
+*/
         return table;
     }
-
     /// <summary>Adds a key/value row; the key is escaped, the value is markup.</summary>
     public static Table Row(this Table table, string key, string valueMarkup)
     {
@@ -85,10 +86,10 @@ public static class Ui
     /// <summary>The loaded image (and optionally the connected device), identical for flash and patch.</summary>
     public static void FirmwareSummary(string path, FenderFirmware firmware, FenderAmp? amp = null)
     {
-        var table = KeyValues("Firmware")
+        var table = KeyValues()
             .Row("File", $"[bold]{Markup.Escape(path)}[/]")
-            .Row("Size", $"{firmware.Size} bytes")
-            .Row("CRC-32", $"0x{firmware.CheckSumCalculated:X8} [green]valid[/]");
+            .Row("Size", $"{firmware.Info.Size} bytes")
+            .Row("CRC-32", $"0x{firmware.Info.CrcCalculated:X8} [green]valid[/]");
 
         if (amp != null)
         {

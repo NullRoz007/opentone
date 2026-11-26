@@ -32,6 +32,7 @@ presets-raw.json
 firmware/
 *.bin
 # *.pcapng
+pullallpresets.ps1
 
 # OS files
 .DS_Store

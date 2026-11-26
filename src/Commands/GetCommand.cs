@@ -49,6 +49,7 @@ public class GetCommand : AmpCommand<GetSettings>
             "preset" => $"Preset {s.Arg1}",
             _ => $"Node {s.Arg1}",
         };
+        
         Ui.Result(title, result);
     }
 
