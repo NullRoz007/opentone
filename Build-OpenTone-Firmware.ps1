@@ -22,10 +22,10 @@
     ./Build-OpenTone-Firmware.ps1 -Splash ./static/logo.bmp -DryRun
 #>
 param(
-    [string] $Firmware = "./firmware/lt25-2.1.4.bin",
-    [string] $Output   = "./firmware/lt25-2.1.4-opentone.bin",
+    [string] $Firmware = "./fw/lt25-2.1.4.bin",
+    [string] $Output   = "./fw/lt25-2.1.4-opentone.bin",
     [string] $Presets  = "./presets/custom",
-    [string] $Splash   = "./assets/logo.bmp",
+    [string] $Splash   = "./assets/splash-red.bmp",
     # Validate everything without writing the output image.
     [switch] $DryRun,
     # Path to the built OpenTone executable; falls back to "dotnet run" if it doesn't exist.

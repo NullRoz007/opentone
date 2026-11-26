@@ -29,4 +29,5 @@ public interface IDeviceSettings
         }
 
         protected abstract void Run(FenderAmp amp, TSettings settings);
+  
     }

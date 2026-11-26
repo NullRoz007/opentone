@@ -1,4 +1,5 @@
 using LibUsbDotNet;
+using LibUsbDotNet.Info;
 using LibUsbDotNet.LibUsb;
 
 namespace OpenTone
@@ -53,6 +54,34 @@ namespace OpenTone
             foreach (var other in devices)
                 if (!known.Contains(other)) other.Dispose();
             return known;
+        }
+
+        public readonly record struct HardwareInfo(ushort Vid, ushort Pid, string? Serial, LocationId Location);
+        internal static HardwareInfo? GetHardwareInfo(IUsbDevice device)
+        {
+            byte[] descriptor = new byte[18];
+
+            if (!device.GetDescriptor(0x01, 0, 0, descriptor, descriptor.Length, out int length)
+                || length < 18)
+                return null;
+
+            string? serial = null;
+            byte serialIndex = descriptor[16];
+
+            if (serialIndex != 0 &&
+                device.GetLangIDs(out short[] languages) &&
+                languages.Length > 0 &&
+                device.GetString(out string value, languages[0], serialIndex))
+            {
+                serial = value;
+            }
+
+            return new(
+                device.VendorId,
+                device.ProductId,
+                serial,
+                device.LocationId
+            );
         }
     }
 }

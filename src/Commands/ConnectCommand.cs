@@ -3,22 +3,21 @@ using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
 
-public class ConnectSettings : CommandSettings
+public class ConnectSettings : CommandSettings, IDeviceSettings
     {
         [CommandOption("-d|--device")]
         [Description("Target device")]
         public required string Device { get; init; }
     }
 
-    public class ConnectCommand : Command<ConnectSettings>
+    public class ConnectCommand : AmpCommand<ConnectSettings>
     {
-        public override int Execute(
-            CommandContext context,
-            ConnectSettings settings,
-            CancellationToken cancellationToken)
+        protected override void Run(FenderAmp amp, ConnectSettings s)
         {
-            using var amp = FenderAmp.Connect(settings.Device);
-
+            RunAsync(amp, s).GetAwaiter().GetResult();
+        }
+        public async Task<int> RunAsync(FenderAmp amp, ConnectSettings s)
+        {
             string? hello = amp.Hello();
 
             if (hello != null)
@@ -27,7 +26,7 @@ public class ConnectSettings : CommandSettings
                 var _ = new WebSocketServer(amp).Run(8080);
 
                 string? sync = amp.Sync();
-                new TuiSession(amp).Run();
+                await new TuiSession(amp).Run();
                 
                 AnsiConsole.Cursor.Show();
                 AnsiConsole.Clear();

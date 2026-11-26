@@ -37,6 +37,7 @@ Commands that talk to the amp take `-d, --device <device>`. Run `opentone list` 
 |---|---|
 | `list` | List attached Fender devices and their mode |
 | `connect` | Open a live session (see below) |
+| `listen <captureid> <playbackid>` | Listen to audio from the amp using the specified capture and playback devices |
 | `firmware` | Show the firmware version |
 | `get <type> <arg1> [arg2]` | Read `param <node> <param>`, `preset <slot>` or `node <node>`. Presets and nodes print as plain JSON |
 | `set <type> <arg1> [arg2] [arg3]` | Set `param <node> <param> <value>`, `preset <slot>` or `model <node> <model>` |
@@ -51,6 +52,7 @@ opentone list
 opentone get preset 1 -d mustang-lt25 > preset1.json
 opentone get param amp gain -d mustang-lt25
 opentone set preset 3 -d mustang-lt25
+opentone listen <captureid> <playbackid> -d mustang-lt25
 ```
 
 ### Live session

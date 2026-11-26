@@ -19,6 +19,36 @@ public static class Ui
         _ => Color.Grey,
     };
 
+    /// <summary>
+    /// Creates a borderless table inside a titled live panel.
+    /// </summary>
+    public static (Table Table, Panel Panel) LiveTable(string title, params string[] columns)
+    {
+        var table = Table(columns)
+            .Border(TableBorder.None)
+            .HideHeaders();
+
+        var panel = new Panel(table)
+            .Header($"[bold]{Markup.Escape(title)}[/]")
+            .Border(BoxBorder.Rounded)
+            .BorderColor(Color.Grey);
+
+        return (table, panel);
+    }
+
+    /// <summary>
+    /// Runs an asynchronous live display.
+    /// </summary>
+    public static Task Live(
+        Panel panel,
+        Func<Spectre.Console.LiveDisplayContext, Task> action,
+        bool autoClear = false)
+    {
+        return AnsiConsole.Live(panel)
+            .AutoClear(autoClear)
+            .StartAsync(action);
+    }
+
     /// <summary>A data table with a header row.</summary>
     public static Table Table(params string[] columns)
     {

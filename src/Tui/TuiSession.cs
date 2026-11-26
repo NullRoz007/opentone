@@ -6,7 +6,7 @@ public sealed class TuiSession(FenderAmp amp)
     private readonly TuiCommandRegistry _commands = new();
     private string _output = "...";
 
-    public void Run()
+    public async Task Run()
     {
         _view.Draw(amp, _output);
 
@@ -23,7 +23,7 @@ public sealed class TuiSession(FenderAmp amp)
 
             _output = parts[0] == "help"
                 ? _commands.Help
-                : _commands.Execute(amp, parts[0], parts[1..]);
+                : await _commands.Execute(amp, parts[0], parts[1..]);
 
             _view.Draw(amp, _output);
         }
