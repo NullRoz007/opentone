@@ -49,6 +49,31 @@ public class AudioCapture : IDisposable
         }
     }
 
+    public AudioCapture()
+    {
+        callbackState = new AudioCallbackState(audioBuffer);
+        
+        unsafe {
+            context = (MaContext*)NativeMemory.Alloc((nuint)sizeof(MaContext));
+
+            if (context == null)
+            {
+                Dispose();
+                throw new OutOfMemoryException();
+            }
+
+            var config = MiniAudio.ContextConfigInit();
+            maResult = MiniAudio.ContextInit(null, 0, &config, context);
+
+            if (maResult != MaResult.Success)
+            {
+                Dispose();
+                throw new InvalidOperationException(
+                    $"Failed to initialise MiniAudio context: {maResult}");
+            }
+        }
+    }
+
     public AudioCapture(object inputDeviceId, object outputDeviceId)
     {
         callbackState = new AudioCallbackState(audioBuffer);
@@ -87,38 +112,37 @@ public class AudioCapture : IDisposable
         }
     }
 
-    private unsafe void InitDevices(object inputDeviceId, object outputDeviceId)
+    public unsafe object ResolveDeviceId(MaDeviceInfo device)
     {
-        var (playbackDevices, captureDevices) = EnumerateDevices();
-
         switch (context->Backend)
         {
             case MaBackend.Wasapi:
             {
-                var inputDeviceInfo = captureDevices.Find(
-                    d => Marshal.PtrToStringUni((nint)(&d.Id.Wasapi_0)) == (string)inputDeviceId);
-
-                var outputDeviceInfo = playbackDevices.Find(
-                    d => Marshal.PtrToStringUni((nint)(&d.Id.Wasapi_0)) == (string)outputDeviceId);
-
-                if (inputDeviceInfo.Equals(default(MaDeviceInfo)))
-                    throw new InvalidOperationException(
-                        $"Capture device not found: {inputDeviceId}");
-
-                if (outputDeviceInfo.Equals(default(MaDeviceInfo)))
-                    throw new InvalidOperationException(
-                        $"Playback device not found: {outputDeviceId}");
-
-                captureDeviceInfo = inputDeviceInfo;
-                playbackDeviceInfo = outputDeviceInfo;
-
-                break;
+                return Marshal.PtrToStringUni((nint)(&device.Id.Wasapi_0))!;
             }
-
             default:
-                throw new InvalidOperationException(
-                    $"Unsupported active backend: {context->Backend}");
+            throw new InvalidOperationException(
+                $"Unsupported active backend: {context->Backend}");
         }
+    }
+
+    public unsafe string BackendName() => context->Backend.ToString();
+    private void InitDevices(object inputDeviceId, object outputDeviceId)
+    {
+        var (playbackDevices, captureDevices) = EnumerateDevices();
+        var inputDeviceInfo = captureDevices.Find(d => Equals(ResolveDeviceId(d), inputDeviceId));
+        var outputDeviceInfo = playbackDevices.Find(d => Equals(ResolveDeviceId(d), outputDeviceId));
+
+        if (inputDeviceInfo.Equals(default(MaDeviceInfo)))
+            throw new InvalidOperationException(
+                $"Capture device not found: {inputDeviceId}");
+
+        if (outputDeviceInfo.Equals(default(MaDeviceInfo)))
+            throw new InvalidOperationException(
+                $"Playback device not found: {outputDeviceId}");
+
+        captureDeviceInfo = inputDeviceInfo;
+        playbackDeviceInfo = outputDeviceInfo;
 
         // Keep the callback state alive for both native devices.
         audioBufferHandle = GCHandle.Alloc(callbackState);
@@ -221,7 +245,7 @@ public class AudioCapture : IDisposable
         playbackInitialized = true;
     }
 
-    private unsafe (
+    public unsafe (
         List<MaDeviceInfo> playbackDevices,
         List<MaDeviceInfo> captureDevices
     ) EnumerateDevices()

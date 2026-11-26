@@ -19,13 +19,11 @@ public class ConnectSettings : CommandSettings, IDeviceSettings
         public async Task<int> RunAsync(FenderAmp amp, ConnectSettings s)
         {
             string? hello = amp.Hello();
-
             if (hello != null)
             {
                 amp.StartHeartbeat();
                 var _ = new WebSocketServer(amp).Run(8080);
-
-                string? sync = amp.Sync();
+                amp.Sync();
                 await new TuiSession(amp).Run();
                 
                 AnsiConsole.Cursor.Show();

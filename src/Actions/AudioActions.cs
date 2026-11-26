@@ -9,7 +9,8 @@ static class AudioActions
             "Metric",
             "Value"
         );
-
+        
+        table.Expand();
         table.AddRow("Capture", "0");
         table.AddRow("Playback", "0");
         table.AddRow("Buffered", "0");

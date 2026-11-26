@@ -10,7 +10,8 @@ using Spectre.Console.Json;
 public static class Ui
 {
     public enum Level { Info, Note, Success, Warning, Error }
-
+    private readonly static TableBorder TableBorderStyle = TableBorder.Rounded;
+    private readonly static BoxBorder PanelBorderStyle = BoxBorder.Rounded;
     private static Color BorderColor(Level level) => level switch
     {
         Level.Success => Color.Green,
@@ -52,7 +53,7 @@ public static class Ui
     /// <summary>A data table with a header row.</summary>
     public static Table Table(params string[] columns)
     {
-        var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
+        var table = new Table().Border(TableBorderStyle).BorderColor(Color.Grey);
         foreach (var c in columns) table.AddColumn(new TableColumn($"[bold]{Markup.Escape(c)}[/]"));
         return table;
     }
@@ -60,7 +61,7 @@ public static class Ui
     /// <summary>A two-column key/value table without a header row. Keys are plain text, values are markup.</summary>
     public static Table KeyValues()
     {
-        var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey).HideHeaders()
+        var table = new Table().Border(TableBorderStyle).BorderColor(Color.Grey).HideHeaders()
             .AddColumn(new TableColumn("").NoWrap())
             .AddColumn(new TableColumn(""));
 /*
@@ -99,7 +100,7 @@ public static class Ui
     {
         AnsiConsole.Write(new Panel(new JsonText(json?.ToJsonString() ?? "null"))
             .Header($"[bold]{Markup.Escape(title)}[/]")
-            .Border(BoxBorder.Rounded)
+            .Border(PanelBorderStyle)
             .BorderColor(Color.Grey));
     }
 
