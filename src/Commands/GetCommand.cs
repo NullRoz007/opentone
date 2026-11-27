@@ -8,12 +8,12 @@ using System.ComponentModel;
 public class GetSettings : CommandSettings, IDeviceSettings
 {
     [CommandArgument(0, "<type>")]
-    [Description("What to get: param, preset, node, mem (needs the debug hook firmware)")]
+    [Description("What to get: param, preset, node, mem, context or asset (mem, context and asset need the debug hook firmware)")]
     public required string Type { get; init; }
 
-    [CommandArgument(1, "<arg1>")]
+    [CommandArgument(1, "[arg1]")]
     [Description("Node ID, preset slot or memory address")]
-    public required string Arg1 { get; init; }
+    public string Arg1 { get; init; } = "";
 
     [CommandArgument(2, "[arg2]")]
     [Description("Parameter ID or number of bytes")]
@@ -34,6 +34,8 @@ public class GetCommand : AmpCommand<GetSettings>
             "preset" => AmpActions.GetPreset(amp, int.Parse(s.Arg1)),
             "node" => AmpActions.ViewNode(amp, s.Arg1),
             "mem" => AmpActions.Peek(amp, s.Arg1, s.Arg2 ?? "16"),
+            "asset" => AmpActions.ReadAsset(amp, s.Arg1, s.Arg2 ?? throw new ArgumentException("get asset <slot> <output file>")),
+            "context" => AmpActions.Context(amp),
             _ => throw new ArgumentException("Unknown type: " + s.Type)
         };
 
@@ -49,6 +51,8 @@ public class GetCommand : AmpCommand<GetSettings>
             "param" => $"{s.Arg1}.{s.Arg2}",
             "preset" => $"Preset {s.Arg1}",
             "mem" => $"Memory at {s.Arg1}",
+            "asset" => $"Asset at slot {s.Arg1}",
+            "context" => "Firmware objects",
             _ => $"Node {s.Arg1}",
         };
         

@@ -6,7 +6,7 @@ using Spectre.Console.Cli;
 public class SetSettings : CommandSettings, IDeviceSettings
 {
     [CommandArgument(0, "<type>")]
-    [Description("What to set: param, preset, model, mem (needs the debug hook firmware)")]
+    [Description("What to set: param, preset, model, mem or asset (mem and asset need the debug hook firmware)")]
     public required string Type { get; init; }
 
     [CommandArgument(1, "<arg1>")]
@@ -36,6 +36,7 @@ public class SetCommand : AmpCommand<SetSettings>
             "preset" => AmpActions.SetPreset(amp, int.Parse(s.Arg1)),
             "model" => AmpActions.SetModel(amp, s.Arg1, s.Arg2 ?? ""),
             "mem" => AmpActions.Poke(amp, s.Arg1, s.Arg2 ?? throw new ArgumentException("set mem <address> <hex bytes>")),
+            "asset" => AmpActions.WriteAsset(amp, s.Arg1, s.Arg2 ?? throw new ArgumentException("set asset <slot> <file>")),
             _ => throw new ArgumentException("Unknown type: " + s.Type)
         };
 
@@ -45,6 +46,7 @@ public class SetCommand : AmpCommand<SetSettings>
             "preset" => $"Preset {s.Arg1} selected",
             "model" => $"Node {s.Arg1} after setting model",
             "mem" => $"Memory at {s.Arg1}",
+            "asset" => $"Asset at slot {s.Arg1}",
             _ => "Result",
         };
         Ui.Result(title, result);

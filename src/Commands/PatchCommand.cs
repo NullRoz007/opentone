@@ -72,7 +72,7 @@ public class PatchSettings : CommandSettings
     public string[] Image { get; init; } = [];
 
     [CommandOption("--hook <FIELD=FILE>")]
-    [Description("Compile a C hook (see hooks/opentone.h) and install it on an unhandled message field, e.g. 12=hooks/debug.c. Needs arm-none-eabi-gcc. Repeatable. 'patch --info' lists the free fields.")]
+    [Description("Compile a C hook (see hooks/opentone.h) and install it: on an unhandled message field (12=hooks/debug.c), once after boot (boot=FILE) or every millisecond (tick=FILE). Needs arm-none-eabi-gcc. Repeatable. 'patch --info' lists the free fields.")]
     public string[] Hook { get; init; } = [];
 
     [CommandOption("--dry-run")]
@@ -157,20 +157,26 @@ public class PatchCommand : Command<PatchSettings>
 
         if (settings.Hook.Length > 0)
         {
+            // FIELD=FILE for a message hook, boot=FILE or tick=FILE for main-loop hooks.
             var hooks = settings.Hook.Select(spec =>
             {
-                var (field, file) = Split(spec, '=', "--hook", "FIELD=FILE");
-                if (!int.TryParse(field, out int f)) throw new ArgumentException($"--hook expects a field number, got '{field}'.");
+                var (target, file) = Split(spec, '=', "--hook", "FIELD=FILE, boot=FILE or tick=FILE");
                 if (!File.Exists(file)) throw new FileNotFoundException($"Hook source not found: {file}", file);
-                return (Field: f, File: file);
+                string kind = target.ToLowerInvariant();
+                if (kind is "boot" or "tick") return (Kind: kind, Field: 0, File: file);
+                if (!int.TryParse(target, out int f)) throw new ArgumentException($"--hook expects a field number, boot or tick, got '{target}'.");
+                return (Kind: "message", Field: f, File: file);
             }).ToList();
             var (_, _, symbols) = patcher.HookTarget();      // first: refuses unknown or already-hooked images
             var slots = patcher.HookSlots();
-            foreach (var h in hooks)
+            foreach (var h in hooks.Where(h => h.Kind == "message"))
                 if (!slots.ContainsKey(h.Field))
                     throw new ArgumentException($"{h.File}: field {h.Field} can't be hooked. Free fields: {string.Join(", ", slots.Keys.Order())}.");
-            byte[] code = CompileHooks(hooks, slots, symbols);
-            patcher.InstallHooks(code, hooks.Select(h => (h.Field, Path.GetFileName(h.File))).ToList());
+            var (code, bootEntry, tickEntry) = CompileHooks(hooks, slots, symbols, patcher);
+            patcher.InstallHooks(code,
+                hooks.Where(h => h.Kind == "message").Select(h => (h.Field, Path.GetFileName(h.File))).ToList(),
+                hooks.Where(h => h.Kind != "message").Select(h => (h.Kind, Path.GetFileName(h.File))).ToList(),
+                bootEntry, tickEntry);
         }
 
         if (settings.FirmwareVersion != null) patcher.SetVersion(settings.FirmwareVersion);
@@ -210,17 +216,34 @@ public class PatchCommand : Command<PatchSettings>
     }
 
     /// <summary>
-    /// Compiles and links the hooks into one blob for the address in <paramref name="symbols"/> (OT_BASE),
-    /// with arm-none-eabi-gcc. The runtime (opentone.h, runtime/) is taken from the first hook's folder if it
-    /// has one, otherwise ./hooks. Each hook gets OT_HOOK_FIELD, OT_HOOK_NAME and its slot's sizes, and a
-    /// generated table maps field numbers to hooks for runtime/entry.S.
+    /// Compiles and links the hooks into one blob for the address in <paramref name="found"/> (OT_BASE), with
+    /// arm-none-eabi-gcc. The runtime (opentone.h, runtime/) is taken from the first hook's folder if it has
+    /// one, otherwise ./hooks. Each hook gets OT_HOOK_FIELD, OT_HOOK_NAME, its kind, its slot's sizes and
+    /// OT_HOOK_DIR (for OT_INCBIN). A generated table maps field numbers to message hooks (runtime/entry.S)
+    /// and lists boot and tick hooks (runtime/runtime.c).
+    /// Firmware functions for hooks/firmware.h come from runtime/*.sym. A table is used only if every entry's
+    /// bytes match the image, so its addresses are never applied to another build.
+    /// Returns the blob (.text, then .data's initial values) and the boot and tick entry addresses.
     /// </summary>
-    private static byte[] CompileHooks(List<(int Field, string File)> hooks,
-        IReadOnlyDictionary<int, (int Size, int? BytesMax)> slots, IReadOnlyDictionary<string, uint> symbols)
+    private static (byte[] Code, uint BootEntry, uint TickEntry) CompileHooks(List<(string Kind, int Field, string File)> hooks,
+        IReadOnlyDictionary<int, (int Size, int? BytesMax)> slots, IReadOnlyDictionary<string, uint> found, FirmwarePatcher patcher)
     {
         string runtime = new[] { Path.GetDirectoryName(Path.GetFullPath(hooks[0].File))!, Path.GetFullPath("hooks") }
             .FirstOrDefault(d => File.Exists(Path.Combine(d, "opentone.h")) && File.Exists(Path.Combine(d, "runtime", "hooks.ld")))
             ?? throw new FileNotFoundException("Hook runtime not found: put hooks next to opentone.h and runtime/, or run from the OpenTone folder (./hooks).");
+
+        var symbols = new Dictionary<string, uint>(found);
+        foreach (string table in Directory.GetFiles(Path.Combine(runtime, "runtime"), "*.sym").Order(StringComparer.Ordinal))
+        {
+            var entries = File.ReadLines(table)
+                .Select(l => l.Trim())
+                .Where(l => l.Length > 0 && !l.StartsWith('#'))
+                .Select(l => l.Split((char[])[' ', '\t'], 4, StringSplitOptions.RemoveEmptyEntries))
+                .Select(f => (Name: f[0], Address: Convert.ToUInt32(f[1], 16), Code: Convert.FromHexString(f[2])))
+                .ToList();
+            if (entries.Count > 0 && entries.All(e => patcher.CodeMatches(e.Address, e.Code)))
+                foreach (var e in entries) symbols.TryAdd(e.Name, e.Address | 1);    // Thumb functions
+        }
 
         string work = Directory.CreateTempSubdirectory("opentone-hooks-").FullName;
         try
@@ -229,39 +252,74 @@ public class PatchCommand : Command<PatchSettings>
             string[] cflags = [.. cpu, "-Os", "-std=gnu11", "-ffreestanding", "-fno-common", "-ffunction-sections", "-fdata-sections",
                 "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-Wall", "-Wextra", "-I", runtime];
             var objects = new List<string>();
-            string Compile(string source, string name, params string[] extra)
+            void Compile(string source, string name, params string[] extra)
             {
                 string obj = Path.Combine(work, name + ".o");
                 RunTool("arm-none-eabi-gcc", [.. cflags, .. extra, "-c", source, "-o", obj]);
                 objects.Add(obj);
-                return obj;
             }
 
             Compile(Path.Combine(runtime, "runtime", "entry.S"), "entry");
             Compile(Path.Combine(runtime, "runtime", "runtime.c"), "runtime");
-            foreach (var (field, file) in hooks)
+
+            var boot = new List<string>();
+            var tick = new List<string>();
+            var messages = new List<(int Field, string Name)>();
+            foreach (var (kind, field, file) in hooks)
             {
-                var (size, bytesMax) = slots[field];
-                Compile(Path.GetFullPath(file), $"hook_{field}", $"-DOT_HOOK_FIELD={field}", $"-DOT_HOOK_NAME=ot_hook_{field}",
-                    $"-DOT_SLOT_SIZE={size}", $"-DOT_SLOT_BYTES_MAX={bytesMax ?? 0}");
+                string full = Path.GetFullPath(file);
+                string dir = $"-DOT_HOOK_DIR=\"{Path.GetDirectoryName(full)!.Replace('\\', '/')}\"";
+                if (kind == "message")
+                {
+                    var (size, bytesMax) = slots[field];
+                    string name = $"ot_hook_{field}";
+                    Compile(full, name, $"-DOT_HOOK_FIELD={field}", $"-DOT_HOOK_NAME={name}",
+                        $"-DOT_SLOT_SIZE={size}", $"-DOT_SLOT_BYTES_MAX={bytesMax ?? 0}", dir);
+                    messages.Add((field, name));
+                }
+                else
+                {
+                    var list = kind == "boot" ? boot : tick;
+                    string name = $"ot_{kind}_{list.Count}";
+                    Compile(full, name, "-DOT_HOOK_FIELD=0", $"-DOT_HOOK_NAME={name}", $"-DOT_HOOK_KIND_{kind.ToUpperInvariant()}", dir);
+                    list.Add(name);
+                }
             }
 
             string table = Path.Combine(work, "table.c");
             File.WriteAllText(table,
                 "#define OT_HOOK_FIELD 0\n#define OT_HOOK_NAME ot_table_unused\n#include \"opentone.h\"\n" +
-                string.Concat(hooks.Select(h => $"void ot_hook_{h.Field}(ot_manager *, const ot_message *);\n")) +
+                string.Concat(messages.Select(m => $"void {m.Name}(ot_manager *, const ot_message *);\n")) +
+                string.Concat(boot.Concat(tick).Select(n => $"void {n}(ot_manager *);\n")) +
                 "const struct { uint32_t field; void (*hook)(ot_manager *, const ot_message *); } ot_hooks[]\n" +
                 "    __attribute__((section(\".rodata.ot_hooks\"), used)) = {\n" +
-                string.Concat(hooks.Select(h => $"    {{ {h.Field}, ot_hook_{h.Field} }},\n")) +
-                "    { 0, 0 },\n};\n");
+                string.Concat(messages.Select(m => $"    {{ {m.Field}, {m.Name} }},\n")) +
+                "    { 0, 0 },\n};\n" +
+                "typedef void (*ot_loop_hook)(ot_manager *);\n" +
+                $"const ot_loop_hook ot_boot_hooks[] = {{ {string.Concat(boot.Select(n => n + ", "))}0 }};\n" +
+                $"const ot_loop_hook ot_tick_hooks[] = {{ {string.Concat(tick.Select(n => n + ", "))}0 }};\n");
             Compile(table, "table");
 
             string elf = Path.Combine(work, "hooks.elf"), bin = Path.Combine(work, "hooks.bin");
-            RunTool("arm-none-eabi-gcc", [.. cpu, "-nostdlib", "-nostartfiles", "-T", Path.Combine(runtime, "runtime", "hooks.ld"),
-                "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
-                .. symbols.Select(kv => $"-Wl,--defsym={kv.Key}=0x{kv.Value:x8}"), .. objects, "-lgcc", "-o", elf]);
-            RunTool("arm-none-eabi-objcopy", ["-O", "binary", "-j", ".text", elf, bin]);
-            return File.ReadAllBytes(bin);
+            try
+            {
+                RunTool("arm-none-eabi-gcc", [.. cpu, "-nostdlib", "-nostartfiles", "-T", Path.Combine(runtime, "runtime", "hooks.ld"),
+                    "-Wl,--gc-sections", "-Wl,--no-warn-rwx-segments",
+                    .. symbols.Select(kv => $"-Wl,--defsym={kv.Key}=0x{kv.Value:x8}"), .. objects, "-lgcc", "-o", elf]);
+            }
+            catch (InvalidOperationException e) when (e.Message.Contains("undefined reference to `fw_"))
+            {
+                throw new InvalidOperationException(e.Message +
+                    "\n\nA hook uses firmware functions that are not available for this image: no table in hooks/runtime/*.sym matches it.");
+            }
+            RunTool("arm-none-eabi-objcopy", ["-O", "binary", "-j", ".text", "-j", ".data", elf, bin]);
+
+            // Entry points for the two main-loop calls the patcher redirects.
+            var entries = RunTool("arm-none-eabi-nm", [elf]).Split('\n')
+                .Select(l => l.Trim().Split(' '))
+                .Where(f => f.Length == 3 && f[2] is "ot_boot_entry" or "ot_tick_entry")
+                .ToDictionary(f => f[2], f => Convert.ToUInt32(f[0], 16));
+            return (File.ReadAllBytes(bin), entries["ot_boot_entry"], entries["ot_tick_entry"]);
         }
         finally
         {
@@ -269,7 +327,7 @@ public class PatchCommand : Command<PatchSettings>
         }
     }
 
-    private static void RunTool(string tool, IEnumerable<string> args)
+    private static string RunTool(string tool, IEnumerable<string> args)
     {
         var psi = new System.Diagnostics.ProcessStartInfo(tool) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         foreach (var a in args) psi.ArgumentList.Add(a);
@@ -284,6 +342,7 @@ public class PatchCommand : Command<PatchSettings>
         p.WaitForExit();
         if (p.ExitCode != 0)
             throw new InvalidOperationException($"{tool} failed:\n{(stderr + stdout.Result).Trim()}");
+        return stdout.Result;
     }
 
     /// <summary>True if the file starts with the PcapNG section header magic.</summary>

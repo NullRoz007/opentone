@@ -128,6 +128,14 @@ public sealed class FirmwarePatcher
     private const int MessageSize = 0xfb0;  // the firmware's top-level nanopb message
     private const int StatusField = 200;    // generic status reply, sent by the default case
 
+    // Main loop (2.1.4, 0x80fa1e0). Exact bytes, refused if not found once, like the boot patches:
+    //   +0x08 bl display_start      (once, before the loop)        -> bl ot_boot_entry
+    //   +0x30 bl controller_manager (controller -> MessageCommManager*)
+    private static readonly byte[] MainLoopStartSignature = Convert.FromHexString(
+        "297b21a8f8f738fe14f0aafe474f21a8f7f7aafe2ef716fd8442f8d02ef712fd044606a8e4f72cfd6868e4f729fb21a8f8f708fe0cf090f9");
+    //   +0x06 bl controller_tick    (once per millisecond)        -> bl ot_tick_entry
+    private static readonly byte[] MainLoopTickSignature = Convert.FromHexString("fbf7f5f921a8f8f77efcbfe7");
+
     public IReadOnlyList<FirmwareJsonEntry> Presets { get; }
     public FirmwareJsonEntry EmptyPreset { get; }
     public IReadOnlyDictionary<string, FirmwareJsonEntry> Models { get; }
@@ -996,6 +1004,7 @@ public sealed class FirmwarePatcher
             @new = DecodeBl(p);
         if (@new == null) throw new NotSupportedException("Hooks: operator new not found in the status reply builder.");
 
+        var (start, tick) = MainLoopSites();
         uint @base = LoadAddress + (uint)original.Length;
         return (@base, dflt, new Dictionary<string, uint>
         {
@@ -1006,14 +1015,31 @@ public sealed class FirmwarePatcher
             ["fw_new"] = @new.Value | 1,
             ["fw_sized_delete"] = delete | 1,
             ["fw_send"] = send | 1,
+            ["fw_display_start"] = DecodeBl(start + 0x08)!.Value | 1,
+            ["fw_controller_manager"] = DecodeBl(start + 0x30)!.Value | 1,
+            ["fw_controller_tick"] = DecodeBl(tick + 0x06)!.Value | 1,
         });
     }
 
+    /// <summary>Offsets of the two main-loop patch sites (start, tick). Throws if either isn't found exactly once.</summary>
+    private (int Start, int Tick) MainLoopSites()
+    {
+        var start = FindAll(MainLoopStartSignature);
+        var tick = FindAll(MainLoopTickSignature);
+        if (start.Count != 1 || tick.Count != 1)
+            throw new NotSupportedException("Hooks: the main loop was not recognised. Unsupported firmware or already patched.");
+        return (start[0], tick[0]);
+    }
+
     /// <summary>
-    /// Installs linked hook code (from hooks/runtime/hooks.ld, entry point first) for the given slots: the
-    /// default case's first 6 bytes become b.w to the code, and Build() appends the code after the image.
+    /// Installs linked hook code (from hooks/runtime/hooks.ld, message entry point first). The default case's
+    /// first 6 bytes become b.w to the code. The main loop's call to display_start (once, before the loop)
+    /// becomes a call to <paramref name="bootEntry"/>, which sets up hook RAM. If there are boot or tick
+    /// hooks, its per-millisecond controller_tick call becomes a call to <paramref name="tickEntry"/>.
+    /// Build() appends the code after the image.
     /// </summary>
-    public void InstallHooks(byte[] code, IReadOnlyList<(int Field, string Name)> hooks)
+    public void InstallHooks(byte[] code, IReadOnlyList<(int Field, string Name)> hooks,
+        IReadOnlyList<(string Kind, string Name)> loopHooks, uint bootEntry, uint tickEntry)
     {
         if (hookCode.Length > 0) throw new InvalidOperationException("Hooks are already installed.");
         if (code.Length == 0) throw new ArgumentException("Hook code is empty.", nameof(code));
@@ -1028,14 +1054,37 @@ public sealed class FirmwarePatcher
         long end = @base + code.Length + 4;
         if (end > FlashEnd) throw new ArgumentException($"Hook code is {code.Length} bytes; only {FlashEnd - @base - 4} fit after the image.");
 
+        uint codeEnd = @base + (uint)code.Length;
+        if (bootEntry < @base || bootEntry >= codeEnd || (loopHooks.Count > 0 && (tickEntry < @base || tickEntry >= codeEnd)))
+            throw new ArgumentException("Hook entry points are outside the hook code.");
+
         int o = ToOffset(dflt);
         EncodeBW(dflt, @base).CopyTo(image, o);
         image[o + 4] = 0x00; image[o + 5] = 0xBF;        // nop
         allowedRegions.Add((o, o + 6, "hook branch"));
+
+        var (start, tick) = MainLoopSites();
+        EncodeBl(LoadAddress + (uint)start + 0x08, bootEntry).CopyTo(image, start + 0x08);
+        allowedRegions.Add((start + 0x08, start + 0x0c, "hook boot call"));
+        if (loopHooks.Count > 0)
+        {
+            EncodeBl(LoadAddress + (uint)tick + 0x06, tickEntry).CopyTo(image, tick + 0x06);
+            allowedRegions.Add((tick + 0x06, tick + 0x0a, "hook tick call"));
+        }
+
         hookCode = (byte[])code.Clone();
         foreach (var (field, name) in hooks)
             Changes.Add($"hook: field {field} handled by {name}");
+        foreach (var (kind, name) in loopHooks)
+            Changes.Add(kind == "boot" ? $"hook: {name} runs once after boot" : $"hook: {name} runs every millisecond");
         Changes.Add($"hooks: {code.Length} bytes of code at 0x{@base:X8}, default case at 0x{dflt:X8} branches to it");
+    }
+
+    /// <summary>True if the unpatched image has exactly <paramref name="expected"/> at <paramref name="address"/>.</summary>
+    public bool CodeMatches(uint address, ReadOnlySpan<byte> expected)
+    {
+        long o = (long)address - LoadAddress;
+        return o >= 0 && o + expected.Length <= original.Length - 4 && original.AsSpan((int)o, expected.Length).SequenceEqual(expected);
     }
 
     private ushort Half(int o) => BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(o));
@@ -1065,6 +1114,14 @@ public sealed class FirmwarePatcher
         int imm = (s << 20) | (j2 << 19) | (j1 << 18) | ((h1 & 0x3F) << 12) | ((h2 & 0x7FF) << 1);
         if (s != 0) imm |= unchecked((int)0xFFE00000);
         return (uint)(LoadAddress + o + 4 + imm);
+    }
+
+    /// <summary>BL (T1) from <paramref name="from"/> to <paramref name="to"/> (a Thumb function).</summary>
+    private static byte[] EncodeBl(uint from, uint to)
+    {
+        byte[] b = EncodeBW(from, to & ~1u);
+        b[3] |= 0x40;                          // bit 14 of the second halfword: BL instead of B.W
+        return b;
     }
 
     /// <summary>B.W (T4) from <paramref name="from"/> to <paramref name="to"/>.</summary>

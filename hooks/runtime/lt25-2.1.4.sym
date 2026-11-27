@@ -1,0 +1,32 @@
+# Firmware symbols for hooks: Mustang LT25 2.1.4 (SHA-256 0f48ee02...c036ac).
+# name  address  first-8-bytes  description
+# The patcher links a symbol only if the image has exactly these bytes at the address, so a
+# table never applies to another build. Addresses are Thumb functions (the patcher sets bit 0).
+# Every entry was identified by disassembly; see hooks/firmware.h for what is tested on hardware.
+fw_hal_get_tick              0x08028c24  014b1868704700bf  HAL_GetTick: milliseconds since boot (uwTick at 0x2000b70c)
+fw_hal_delay                 0x08028c30  38b50446fff7f6ff  HAL_Delay(ms): busy-waits on the tick
+fw_gpio_read                 0x0802b060  0369194214bf0120  HAL_GPIO_ReadPin(port, pin): IDR & pin
+fw_gpio_write                0x0802b06c  0ab9418370470183  HAL_GPIO_WritePin(port, pin, state): BSRR
+fw_gpio_toggle               0x0802b078  4369594041617047  HAL_GPIO_TogglePin(port, pin)
+fw_button_read               0x080f12b0  08b506283fd8dfe8  front-panel input 0-6, normalised level (boot-time button reader)
+fw_strlen                    0x08028ac0  90f800f06de90245  strlen
+fw_delete                    0x08145e08  2ef024b801f076b8  operator delete(void*), frees std::string heap buffers
+fw_signal_emit               0x080f448c  2de9f041d0e90157  Signal::emit(signal*): calls every connected std::function
+fw_app_preset_index          0x080ecb7c  41f24433c0587047  App::currentPresetIndex(app) -> 0..59
+fw_app_set_preset_index      0x080ecb6c  3b2988bf002141f2  App::setCurrentPresetIndex(app, 0..59), no side effects
+fw_app_preset_modified       0x080ecb64  00f59a5000787047  App::presetModified(app) -> bool (+0x1340)
+fw_app_set_preset_modified   0x080ecb4c  00f59a52137810b4  App::setPresetModified(app, bool)
+fw_app_firmware_version      0x080eca2c  70b5054641f29432  App::firmwareVersion(std::string* out, app)
+fw_app_stored_preset         0x080ecd8c  3b2a0b4601f59251  App::storedPreset(std::string* out, app, 0..59): JSON from data flash
+fw_dsp_current_preset        0x080fe178  2de9f04fc5b00d46  DspHost::currentPresetJson(std::string* out, app): live preset
+fw_flash_read_slot           0x08102c30  cb69934270b50446  SlotWriter::read(std::string* out, writer, slot)
+fw_flash_write_slot          0x08102c68  c3698b4201d80020  SlotWriter::write(writer, slot, const std::string*) -> bool, journaled
+fw_send_preset               0x08107110  2de9f0414e1e0023  MessageCommManager::sendPreset(mgr, slot 1..60): field 31 to the host
+fw_send_current_preset       0x081072d8  f0b591b000230446  MessageCommManager::sendCurrentPreset(mgr, 2): field 32 to the host
+fw_send_selected_preset      0x08107ad8  30b5044685b00068  MessageCommManager::sendSelectedPreset(mgr, 2): select-preset reply
+fw_lcd_fill                  0x0810ef6c  0022064b60f30f02  fill the whole frame buffer with one RGB565 colour
+fw_lcd_set_pixel             0x0810ef8c  00ebc111014b23f8  fb[y*128 + x] = colour (no bounds check)
+fw_lcd_line                  0x0810ef9c  2de9f04fa2eb000e  Bresenham line (x0, y0, x1, y1, colour on the stack; no bounds check)
+fw_lcd_fill_rect             0x0810f16c  f0b5bdf81470abb1  fill w x h at (x, y), colour on the stack (no bounds check)
+fw_malloc                    0x08173e44  024b0146186800f0  malloc(size): newlib, returns NULL when out of memory
+fw_free                      0x08173e54  024b01461868fff7  free(p): newlib (operator delete branches here)

@@ -91,7 +91,7 @@ namespace OpenTone
         // ---- messages ----
 
         /// <summary>Reads one complete message; throws TimeoutException if a report doesn't arrive.</summary>
-        public byte[] ReadMessage() => ReadMessage(() => Read() ?? throw new TimeoutException());
+        public byte[] ReadMessage(int timeout = DefaultTimeoutMs) => ReadMessage(() => Read(timeout) ?? throw new TimeoutException());
 
         // 00 | type | len | payload (len bytes) | junk padding
         // The report source is a delegate so the deframer can be fed from a capture in tests.

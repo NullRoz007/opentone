@@ -9,7 +9,7 @@ public class CallSettings : CommandSettings, IDeviceSettings
     public required string Address { get; init; }
 
     [CommandArgument(1, "[args]")]
-    [Description("Up to 4 arguments (r0-r3), hex with 0x or decimal")]
+    [Description("Up to 8 arguments (r0-r3, then the stack), hex with 0x or decimal")]
     public string[] Args { get; init; } = [];
 
     [CommandOption("-d|--device")]

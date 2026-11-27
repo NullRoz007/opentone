@@ -35,12 +35,19 @@ Integrity: the app has no references to the CRC peripheral or to its own end add
 
 Helpers: `0x8102c30(out, writer, slot)` reads a slot (empty string if blank). `0x8102c68(writer, slot, string)` does a journaled write.
 
+Details from the code and hardware:
+- **Slot count:** the writer's slot count (`writer+0x1c`) is 500, so the slot API covers 0-499. The journal, factory scratch and marker slots (500+) are outside it.
+- **Usage:** the code only reads and writes slots 0-59, 100-116 (both config ranges map there) and 400. A hardware sample of slots 60, 99, 117, 150, 199, 200, 300, 399, 401 and 499 found them all blank.
+- **Not binary-safe:** the write copies the data with `strcpy` (`0x81750d0`) into a zeroed 4 KB buffer and programs it page by page (`0x81033d4`), and accepts at most 4,094 bytes. The read (`0x8102b58`) copies the whole slot with the raw read `0x810335c(address, length, buffer)` and then uses `strlen`. Both stop at the first zero byte.
+
+OpenTone assets use slots 120-399, one COBS-encoded chunk per slot (no zero bytes). See `hooks/firmware.h`, "Assets in the data flash".
+
 ## Boot
 
 | Address | Behaviour |
 |---|---|
-| `0x80f12b0(idx)` | Reads a front-panel button straight from GPIO. 0=PC12, 1=PD2, 2=PD4, 3=PD5, 4=PD6 (active high), 5=PC15, 6=PD7 (active high). Physical names not mapped yet |
-| `0x80fa8e0` | Button 3 held at power-on: factory test mode. Buttons 1 and 2 held together: force a restore of all 60 presets |
+| `0x80f12b0(idx)` | Reads a front-panel button straight from GPIO. **Mapped on hardware:** 0 = Edit (PC12), 1 = Back (PD2), 2 = Save (PD4), 3 = Menu (PD5), 4 = Tap (PD6, active high). 5 = PC15 and 6 = PD7 (active high) did not change with any button; 5 reads true at rest |
+| `0x80fa8e0` | Menu (button 3) held at power-on: factory test mode. Back + Save (buttons 1 and 2) held together: force a restore of all 60 presets |
 | `0x81263b0` | Boot splash. Calls `checkPresetRestore(force)` at `0x8102258`. It restores all presets when forced, otherwise only blank slots, and shows `RESTORESPLASH` "PRESET nn / 60" |
 | Factory preset table | `0x81bb7c0`: 30 pointers to preset JSON. Slots 31–60 use the `EMPTY` template at `0x81a6708` |
 
@@ -112,6 +119,91 @@ Avoid the data-flash marker strings unless you intend their side effect.
 | `tone` | `0x081c03c0` (7,656 bytes) | 66x58 | x=31, y=36 | Page at `0x812bb..`, the Fender Tone app icon (inferred: shown when Tone connects) |
 
 Each image's size and position are immediates in the drawing code, and its data is packed directly against other data. In-place replacement at the same size is therefore pure data. A larger or full-screen image needs the space after the image (see "Adding code") plus a change to the constructor immediates and the data pointer.
+
+## Application object
+
+The `MessageCommManager*` passed to every USB handler (and to hooks) holds a pointer to the main application object at offset 0. Both live on `main`'s stack (the main loop, `0x80fa1b8`, has a 0x4a4c-byte frame), not in globals. The debug hook's CONTEXT op returns their addresses at runtime: on 2.1.4 the manager is `0x2407cacc` and the app is `0x2407eba0`.
+
+**Tested on hardware through `call` and `get mem`:**
+- session flag (`01` while connected), current index and the modified flag;
+- firmware version (`"2.1.4"`, a small-string `std::string`);
+- stored preset 1 (2,178 bytes of JSON), live preset (2,131 bytes);
+- data-flash slot 100 (`"0"`);
+- preset select: setting the index and emitting `mgr+0x20` loaded slot 2 (the live JSON changed to 2,345 bytes), then slot 1 again. There is no RTOS: everything, including hooks, runs in that main loop.
+
+| Offset | Contents | Evidence |
+|---|---|---|
+| app `+0` | DSP/audio host (getter `0x80ec8e0` returns app itself) | live preset JSON `0x80fe178(out, app)`, set model `0x80fd0a8` |
+| app `+0x27c` | Linear gain, set from dB by `0x80fcd10` | handler 114: dB stored at `+0x13d4` (clamped 0..30 after adding 15) |
+| app `+0x1240` | Data-flash manager (getter `0x80ec8e4`) | `0x8101814(out, fdm, slot)` reads a preset |
+| app `+0x1244` | SlotWriter: read `0x8102c30(out, writer, slot)`, journaled write `0x8102c68(writer, slot, const std::string*)` | slot count at `writer+0x1c` (512) |
+| app `+0x132c` | `vector<int>`: user slot order, index to data-flash slot | `0x80ecd8c(out, app, index)` |
+| app `+0x1340` | Preset-modified flag (`0x80ecb64` / `0x80ecb4c`) | set after a JSON load (handler 45) |
+| app `+0x1344` | Current preset index 0..59 (`0x80ecb7c` / `0x80ecb6c`, clamped, no side effects) | handlers 15, 33, 41, 55 |
+| app `+0x1390` | Firmware version `std::string` (`0x80eca2c(out, app)`) | handler 102 |
+| app `+0x13dd` | Session active (`0x80ecd6c`) | gate in every handler |
+| mgr `+0x20` | Signal emitted after the preset index changes (`0x80f448c` emits a signal: calls each `std::function`) | handlers 33 and 15 |
+
+Other functions:
+
+| Address | Function | Status |
+|---|---|---|
+| `0x8028c24` / `0x8028c30` | `HAL_GetTick` (uwTick `0x2000b70c`) / `HAL_Delay` | GetTick tested on hardware |
+| `0x802b060` / `0x802b06c` / `0x802b078` | `HAL_GPIO_ReadPin` / `WritePin` / `TogglePin` | code |
+| `0x80f12b0` | Front-panel input 0-6 | tested: 0 Edit, 1 Back, 2 Save, 3 Menu, 4 Tap; 5, 6 unknown (5 reads 1 at rest) |
+| `0x8107110` / `0x81072d8` / `0x8107ad8` | Send preset N (31) / current preset (32) / select-preset reply to the host | code |
+| `0x8028ac0`, `0x81744f8`, `0x81745c0` | `strlen`, `memmove`, `memset` | code |
+| `0x8146efc` / `0x8145e08` / `0x8145da0` | operator new / delete / sized delete | code |
+| `0x80ea45c` | Logger: compiled out (returns immediately) | code |
+
+These are the functions in `hooks/firmware.h`, linked from `hooks/runtime/lt25-2.1.4.sym`.
+
+Not wrapped yet: `0x80ed714(app, index, std::string*, 1)` (store a preset, handler 55) and `0x80f07a0(app, std::string*, 1)` (load preset JSON as current, handlers 45, 55, 58). The meaning of their last argument is unknown.
+
+## Display
+
+The screen is driven by the STM32H7's LTDC (`0x50001000`) from a frame buffer in AXI SRAM. These values were read from the LTDC registers on hardware:
+
+| Register | Value | Meaning |
+|---|---|---|
+| `AWCR` | `0x009d00a3` | 128 x 160 active area |
+| `L1WHPCR` / `L1WVPCR` | `0x009d001e` / `0x00a30004` | layer 1 covers the whole area |
+| `L1PFCR` | 2 | RGB565 |
+| `L1CFBAR` | `0x240000e0` | frame buffer |
+| `L1CFBLR` / `L1CFBLNR` | `0x01000107` / 160 | 256-byte pitch, 160 lines |
+
+The panel is set up over SPI once at boot (`0x810edb8`: reset on PB15, then commands such as `0x3a = 0x55`, 16-bit colour). After that it only shows the buffer.
+
+Pixel (x, y) is at `0x240000e0 + (y * 128 + x) * 2`, with (0, 0) at the top left. **Tested:** writing 20 rows into the buffer showed a band along the top of the screen in the expected left/right order. Writes show immediately.
+
+The firmware redraws the whole screen on UI events: turning a knob, pressing a button, or a host connecting (every OpenTone command sends hello and sync). That replaces anything else in the buffer. Between events, a drawing stays.
+
+Drawing functions (none check bounds):
+
+| Address | Function |
+|---|---|
+| `0x810ef6c` | `fill(colour)`: whole screen. Tested |
+| `0x810ef8c` | `set_pixel(x, y, colour)` |
+| `0x810ef9c` | `line(x0, y0, x1, y1, colour)`: Bresenham, colour on the stack |
+| `0x810f16c` | `fill_rect(x, y, w, h, colour)`: colour on the stack |
+| `0x810f0d4` | Dashed horizontal line `(x, row_offset, length, colour)`. The second argument is `y * 128`, not `y`. It alternates the colour with its inverse every 5 pixels |
+| `0x810f11c` | Dashed vertical line `(x, y, length, colour)` |
+| `0x810f1a8`, `0x810f2a8` | Text: `(x, y, string, length)`, then the colour and a size on the stack. The size picks one of two fonts (`0x81be944` / `0x81bc714`). Not mapped further yet |
+
+`hooks/firmware.h` wraps fill, pixel, rectangle and line as `ot_lcd_*` with clipping.
+
+## Main loop
+
+`0x80fa1b8(r0 = config)` is the main loop. It runs once, and never returns:
+- **Setup:** sets up the controller on its stack (`sp+0x84`, which contains the application object and the MessageCommManager), calls `0x810ef40` (display start) once, then loops.
+- **Every pass:** calls `0x80f1f48(controller)`, then waits for the HAL tick to change.
+- **Once per millisecond:** USB message processing (`0x8106538`, via `0x80f2e24(controller)`, which returns `controller + 0x30d0`, the MessageCommManager), session timers, the request dispatcher (`0x8107f78`, from `0x80fa2a8`), the UI update `0x80f5650`, and finally `0x80f2b68(controller)` (timers, then `0x812a2d8(controller + 4)`).
+
+Hook entry points (`--hook boot=` / `tick=`), found by exact byte signatures:
+- `0x80fa1e8 bl 0x810ef40` becomes `bl ot_boot_entry`. That copies hook `.data`, zeroes `.bss`, then calls display start.
+- `0x80fa268 bl 0x80f2b68` becomes `bl ot_tick_entry`. That calls the original first, then the boot hooks once and the tick hooks every time.
+
+Hook RAM is DTCM `0x20018000`-`0x2001f000`. The firmware's `.bss` ends at `0x2000ece0`, and nothing above it is addressed: the only literal is the reset handler's `.bss` end, `.data` has no pointers there, and on hardware the region held unchanged power-on contents. The top of DTCM held the bootloader's stack (return addresses below `0x08020200`), which is dead once the app runs.
 
 ## Adding code: USB debug hook (tested on hardware)
 

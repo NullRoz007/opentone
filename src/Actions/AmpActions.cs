@@ -103,10 +103,39 @@ static class AmpActions
         return $"wrote {data.Length} bytes at 0x{ParseU32(address):x8}";
     }
 
+    /// <summary>The firmware objects hooks work on (needs a debug hook built with CONTEXT).</summary>
+    /// <summary>Stores a file as a data-flash asset (slots 120-399) and reads it back to check it.</summary>
+    public static string WriteAsset(FenderAmp amp, string slot, string file)
+    {
+        byte[] data = File.ReadAllBytes(file);
+        int first = int.Parse(slot), slots = FenderAmp.AssetSlots(data.Length);
+        amp.WriteAsset(first, data);
+        bool same = amp.ReadAsset(first).AsSpan().SequenceEqual(data);
+        return $"{Path.GetFileName(file)}: {data.Length} bytes in slots {first}-{first + slots - 1}, " +
+               (same ? "read back and verified" : "READ-BACK MISMATCH");
+    }
+
+    /// <summary>Reads a data-flash asset into a file.</summary>
+    public static string ReadAsset(FenderAmp amp, string slot, string file)
+    {
+        byte[] data = amp.ReadAsset(int.Parse(slot));
+        File.WriteAllBytes(file, data);
+        return $"{data.Length} bytes written to {file}";
+    }
+
+    public static string Context(FenderAmp amp)
+    {
+        var (mgr, app) = amp.Context();
+        return $"manager = 0x{mgr:x8}\napp     = 0x{app:x8}";
+    }
+
     /// <summary>Calls a firmware function (Thumb bit added automatically) with up to 4 arguments.</summary>
     public static string Call(FenderAmp amp, string function, IEnumerable<string> args)
     {
-        var (r0, r1) = amp.Call(ParseU32(function), args.Select(ParseU32).ToArray());
-        return $"r0 = 0x{r0:x8} ({r0})\nr1 = 0x{r1:x8} ({r1})";
+        var others = new List<(int Field, int Bytes)>();
+        var (r0, r1) = amp.Call(ParseU32(function), args.Select(ParseU32).ToArray(), others);
+        string sent = others.Count == 0 ? "" :
+            "\nalso received: " + string.Join(", ", others.Select(o => $"field {o.Field} ({o.Bytes} bytes)"));
+        return $"r0 = 0x{r0:x8} ({r0})\nr1 = 0x{r1:x8} ({r1}){sent}";
     }
 }

@@ -194,18 +194,26 @@ namespace OpenTone
         // ---- Debug hook (field 12), only answered by a firmware built with the OpenTone hook ----
         // Request bytes: [op][0][0][0][u32 address][args...]. Reply bytes: [op][status][0][0][payload].
 
-        public const byte DebugPeek = 1, DebugPoke = 2, DebugCall = 3;
+        public const byte DebugPeek = 1, DebugPoke = 2, DebugCall = 3, DebugContext = 4,
+            DebugAlloc = 5, DebugFree = 6, DebugSlotWrite = 7, DebugSlotRead = 8;
         public const int DebugMaxPeek = 496;    // 500-byte reply minus the 4-byte header
         public const int DebugMaxPoke = 41;     // a request must fit in one 61-byte OUT frame
+        public const int DebugReplyTimeoutMs = 10000;
 
         /// <summary>
         /// Sends one debug request and returns the reply payload (after the 4-byte header). Throws if the
         /// firmware has no hook (stock answers with the "unsupported" status message) or reports an error.
+        /// Other messages that arrive first (for example ones a called function sends) are listed in
+        /// <paramref name="others"/> as field number and value length.
         /// </summary>
-        public byte[] DebugRequest(byte op, uint address, byte[] args)
+        public byte[] DebugRequest(byte op, uint address, byte[] args, List<(int Field, int Bytes)>? others = null)
         {
+            // Bytes 2-3 carry a request ID that debug.c echoes, so a late reply to an earlier request (one
+            // that timed out here) is not taken for this one. Hooks built before the ID echo leave them 0.
+            ushort id = (ushort)Random.Shared.Next(1, 0x10000);
             var value = new byte[8 + args.Length];
             value[0] = op;
+            BitConverter.TryWriteBytes(value.AsSpan(2), id);
             BitConverter.TryWriteBytes(value.AsSpan(4), address);
             args.CopyTo(value, 8);
 
@@ -218,7 +226,8 @@ namespace OpenTone
                 transport.Write(FenderProtocol.Request(FieldTag.Debug, inner));
                 for (int i = 0; i < transport.MaxReadAttempts; i++)
                 {
-                    var input = new CodedInputStream(transport.ReadMessage());
+                    // A CALL can run a slow firmware function, so wait well beyond the usual 1 s per report.
+                    var input = new CodedInputStream(transport.ReadMessage(DebugReplyTimeoutMs));
                     uint tag;
                     while ((tag = input.ReadTag()) != 0)
                     {
@@ -228,18 +237,24 @@ namespace OpenTone
                                 "The amp answered \"unsupported message\": this firmware has no debug hook. Flash an image built with it first.");
                         if (field != (int)FieldTag.Debug || WireFormat.GetTagWireType(tag) != WireFormat.WireType.LengthDelimited)
                         {
-                            input.SkipLastField();
+                            if (others != null && field != 1 && WireFormat.GetTagWireType(tag) == WireFormat.WireType.LengthDelimited)
+                                others.Add((field, input.ReadBytes().Length));
+                            else
+                                input.SkipLastField();
                             continue;
                         }
 
                         var sub = new CodedInputStream(input.ReadBytes().ToByteArray());
                         byte[] reply = sub.ReadTag() == 0x0a ? sub.ReadBytes().ToByteArray() : [];
                         if (reply.Length < 4 || reply[0] != op) continue;
+                        ushort echoed = BitConverter.ToUInt16(reply, 2);
+                        if (echoed != 0 && echoed != id) continue;          // stale reply to an earlier request
                         if (reply[1] != 0)
                             throw new InvalidOperationException(reply[1] switch
                             {
                                 1 => "The hook rejected the request length.",
-                                2 => "The hook does not know this operation.",
+                                2 => "The hook does not know this operation. Flash a debug hook built from the current hooks/debug.c.",
+                                3 => "The operation failed on the amp.",
                                 _ => $"The hook returned status {reply[1]}.",
                             });
                         return reply[4..];
@@ -271,14 +286,147 @@ namespace OpenTone
             }
         }
 
-        /// <summary>Calls the firmware function at <paramref name="function"/> with up to 4 arguments. Returns r0 and r1.</summary>
-        public (uint R0, uint R1) Call(uint function, params uint[] args)
+        /// <summary>
+        /// Calls the firmware function at <paramref name="function"/> with up to 8 arguments (r0-r3, then the
+        /// stack). Returns r0 and r1. More than 4 needs a debug hook built with 8-argument CALL.
+        /// </summary>
+        /// <remarks>Messages the function sends to the host before returning are added to <paramref name="others"/>.</remarks>
+        public (uint R0, uint R1) Call(uint function, uint[] args, List<(int Field, int Bytes)>? others = null)
         {
-            if (args.Length > 4) throw new ArgumentException("At most 4 arguments (r0-r3)", nameof(args));
-            var regs = new byte[16];
+            if (args.Length > 8) throw new ArgumentException("At most 8 arguments", nameof(args));
+            var regs = new byte[args.Length > 4 ? 32 : 16];
             for (int i = 0; i < args.Length; i++) BitConverter.TryWriteBytes(regs.AsSpan(4 * i), args[i]);
-            byte[] reply = DebugRequest(DebugCall, function, regs);
+            byte[] reply = DebugRequest(DebugCall, function, regs, others);
             return (BitConverter.ToUInt32(reply, 0), BitConverter.ToUInt32(reply, 4));
+        }
+
+        /// <summary>The MessageCommManager and application object addresses (hooks/firmware.h works on them).</summary>
+        public (uint Manager, uint App) Context()
+        {
+            byte[] reply = DebugRequest(DebugContext, 0, []);
+            return (BitConverter.ToUInt32(reply, 0), BitConverter.ToUInt32(reply, 4));
+        }
+
+        // ---- Data-flash assets (see hooks/firmware.h, "Assets in the data flash") ----
+        // Slots 120-399. Each slot holds one COBS-encoded chunk (the firmware's slot functions are
+        // NUL-terminated). The stream is a 16-byte header ("OTA1", u32 length, u32 CRC-32, u32 0) then the data.
+
+        public const int AssetFirstSlot = 120, AssetLastSlot = 399, AssetChunk = 4064;
+        const int SlotCapacity = 4096;
+
+        /// <summary>Allocates on the amp's heap (malloc). Throws if it is out of memory.</summary>
+        public uint Alloc(uint size)
+        {
+            uint p = BitConverter.ToUInt32(DebugRequest(DebugAlloc, size, []), 0);
+            return p != 0 ? p : throw new InvalidOperationException($"The amp could not allocate {size} bytes.");
+        }
+
+        public void Free(uint pointer) => DebugRequest(DebugFree, pointer, []);
+
+        /// <summary>Writes the NUL-free bytes at <paramref name="address"/> on the amp to a data-flash slot.</summary>
+        public void SlotWrite(uint slot, uint address, int length) =>
+            DebugRequest(DebugSlotWrite, address, [.. BitConverter.GetBytes(slot), .. BitConverter.GetBytes(length)]);
+
+        /// <summary>Reads a data-flash slot into amp RAM at <paramref name="address"/>; returns its length.</summary>
+        public int SlotRead(uint slot, uint address, int capacity) =>
+            (int)BitConverter.ToUInt32(DebugRequest(DebugSlotRead, address, [.. BitConverter.GetBytes(slot), .. BitConverter.GetBytes(capacity)]), 0);
+
+        /// <summary>The number of slots an asset of <paramref name="length"/> bytes takes.</summary>
+        public static int AssetSlots(int length) => (16 + length + AssetChunk - 1) / AssetChunk;
+
+        /// <summary>Stores <paramref name="data"/> as an asset in consecutive slots from <paramref name="slot"/>.</summary>
+        public void WriteAsset(int slot, byte[] data, Action<int, int>? progress = null)
+        {
+            int slots = AssetSlots(data.Length);
+            if (slot < AssetFirstSlot || slot + slots - 1 > AssetLastSlot)
+                throw new ArgumentOutOfRangeException(nameof(slot), $"An asset of {data.Length} bytes needs {slots} slots; assets use slots {AssetFirstSlot}-{AssetLastSlot}.");
+
+            byte[] stream = [.. "OTA1"u8, .. BitConverter.GetBytes(data.Length), .. BitConverter.GetBytes(Crc32(data)), 0, 0, 0, 0, .. data];
+            uint buffer = Alloc(SlotCapacity);
+            try
+            {
+                for (int i = 0; i < slots; i++)
+                {
+                    byte[] encoded = CobsEncode(stream.AsSpan(i * AssetChunk, Math.Min(AssetChunk, stream.Length - i * AssetChunk)));
+                    Poke(buffer, [.. encoded, 0]);
+                    SlotWrite((uint)(slot + i), buffer, encoded.Length);
+                    progress?.Invoke(i + 1, slots);
+                }
+            }
+            finally { Free(buffer); }
+        }
+
+        /// <summary>Reads the asset starting at <paramref name="slot"/>. Throws if it is missing or corrupt.</summary>
+        public byte[] ReadAsset(int slot)
+        {
+            if (slot < AssetFirstSlot || slot > AssetLastSlot)
+                throw new ArgumentOutOfRangeException(nameof(slot), $"Assets use slots {AssetFirstSlot}-{AssetLastSlot}.");
+            uint buffer = Alloc(SlotCapacity);
+            try
+            {
+                var stream = new List<byte>();
+                int total = -1;
+                for (int s = slot; s <= AssetLastSlot && (total < 0 || stream.Count < 16 + total); s++)
+                {
+                    int n = SlotRead((uint)s, buffer, SlotCapacity);
+                    if (n == 0) throw new InvalidDataException($"Slot {s} is blank: no asset at {slot}, or it is incomplete.");
+                    stream.AddRange(CobsDecode(Peek(buffer, n)));
+                    if (total < 0)
+                    {
+                        if (stream.Count < 16 || !stream.Take(4).SequenceEqual("OTA1"u8.ToArray()))
+                            throw new InvalidDataException($"Slot {slot} does not start an asset.");
+                        total = BitConverter.ToInt32(stream.ToArray(), 4);
+                    }
+                }
+                byte[] all = stream.ToArray();
+                if (all.Length < 16 + total) throw new InvalidDataException("The asset is incomplete.");
+                byte[] data = all[16..(16 + total)];
+                if (Crc32(data) != BitConverter.ToUInt32(all, 8)) throw new InvalidDataException("The asset's CRC does not match.");
+                return data;
+            }
+            finally { Free(buffer); }
+        }
+
+        static byte[] CobsEncode(ReadOnlySpan<byte> data)
+        {
+            var output = new List<byte>(data.Length + data.Length / 254 + 2);
+            int codeAt = output.Count; output.Add(0);
+            byte code = 1;
+            foreach (byte b in data)
+            {
+                if (b != 0) { output.Add(b); code++; }
+                if (b == 0 || code == 0xff)
+                {
+                    output[codeAt] = code;
+                    codeAt = output.Count; output.Add(0);
+                    code = 1;
+                }
+            }
+            output[codeAt] = code;
+            return output.ToArray();
+        }
+
+        static byte[] CobsDecode(byte[] data)
+        {
+            var output = new List<byte>(data.Length);
+            for (int i = 0; i < data.Length;)
+            {
+                byte code = data[i++];
+                for (int k = 1; k < code && i < data.Length; k++) output.Add(data[i++]);
+                if (code != 0xff && i < data.Length) output.Add(0);
+            }
+            return output.ToArray();
+        }
+
+        static uint Crc32(byte[] data)
+        {
+            uint crc = 0xffffffff;
+            foreach (byte b in data)
+            {
+                crc ^= b;
+                for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xedb88320 & (uint)-(int)(crc & 1));
+            }
+            return ~crc;
         }
 
         JsonNode? ReadPresetJson(FieldTag replyTag)
